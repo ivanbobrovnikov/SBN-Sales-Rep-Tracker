@@ -148,6 +148,7 @@ function periodQueryString(query) {
   const period = query.period || "month";
   const params = { period };
   if (query.date) params.date = query.date;
+  if (query.month) params.month = query.month;
   if (query.startDate) { params.startDate = query.startDate; params.endDate = query.endDate; }
   return new URLSearchParams(params).toString();
 }
