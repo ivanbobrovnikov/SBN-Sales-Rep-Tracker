@@ -295,7 +295,7 @@ function renderSimplePeriodPicker(onChange) {
     if (period === "week") return { period, date: weekInput.value };
     if (period === "year") return { period, date: `${yearInput.value}-01-01` };
     if (period === "custom") return { period, startDate: customStart.value, endDate: customEnd.value };
-    return { period: "month", date: `${monthInput.value}-01` };
+    return { period: "month", month: monthInput.value };
   }
   function fire() { onChange(currentParams()); }
   const tabs = el("div", { style: "display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap" });
@@ -572,8 +572,10 @@ async function renderLeaderboard(app) {
           el("div", { class: "muted", style: "font-size:14px;margin-top:2px", text: `${rep.closeCount} close${rep.closeCount !== 1 ? "s" : ""} today · ${rep.arrivedCount} arrived` }),
         ]),
         el("div", { style: "text-align:right" }, [
-          el("div", { class: "mono", style: "font-size:30px;font-weight:600;color:var(--green)", text: money(rep.actualCommission) }),
-          el("div", { class: "muted", style: "font-size:13px", text: `${money(rep.closedValue)} closed value` }),
+          el("div", { class: "mono", style: "font-size:30px;font-weight:600;color:var(--amber)", text: money(rep.closedValue) }),
+          el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.03em;margin-top:-2px", text: "CLOSED VALUE" }),
+          el("div", { class: "mono", style: "font-size:18px;font-weight:500;color:var(--green);margin-top:6px", text: money(rep.actualCommission) }),
+          el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.03em", text: "COMMISSION (CARS THAT SHOWED)" }),
         ]),
       ]));
     });
