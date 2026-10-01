@@ -545,7 +545,8 @@ async function renderLeaderboard(app) {
   async function load() {
     let data;
     try {
-      data = await api(`/api/combined/salesrep-stats?period=day&date=${new Date().toISOString().slice(0, 10)}`);
+      const todayEastern = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+      data = await api(`/api/combined/salesrep-stats?period=day&date=${todayEastern}&dateBasis=closed`);
     } catch (e) {
       errorBanner.innerHTML = "";
       errorBanner.appendChild(el("div", { style: "color:var(--red);font-size:16px;margin-bottom:20px", text: "Couldn't load — retrying..." }));
