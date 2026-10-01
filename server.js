@@ -150,6 +150,7 @@ function periodQueryString(query) {
   if (query.date) params.date = query.date;
   if (query.month) params.month = query.month;
   if (query.startDate) { params.startDate = query.startDate; params.endDate = query.endDate; }
+  if (query.dateBasis === "closed") params.dateBasis = "closed";
   return new URLSearchParams(params).toString();
 }
 
