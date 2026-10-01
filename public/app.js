@@ -546,7 +546,7 @@ async function renderLeaderboard(app) {
     let data;
     try {
       const todayEastern = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
-      data = await api(`/api/combined/salesrep-stats?period=day&date=${todayEastern}&dateBasis=closed`);
+      data = await api(`/api/combined/salesrep-stats?period=day&date=${todayEastern}`);
     } catch (e) {
       errorBanner.innerHTML = "";
       errorBanner.appendChild(el("div", { style: "color:var(--red);font-size:16px;margin-bottom:20px", text: "Couldn't load — retrying..." }));
@@ -559,7 +559,7 @@ async function renderLeaderboard(app) {
     const ranked = [...data.perRep].sort((a, b) => b.actualCommission - a.actualCommission);
     list.innerHTML = "";
     if (ranked.length === 0) {
-      list.appendChild(el("div", { class: "muted", style: "font-size:20px;text-align:center;margin-top:60px", text: "No closes yet today." }));
+      list.appendChild(el("div", { class: "muted", style: "font-size:20px;text-align:center;margin-top:60px", text: "No activity yet today." }));
       return;
     }
     ranked.forEach((rep, i) => {
@@ -570,7 +570,7 @@ async function renderLeaderboard(app) {
         el("div", { class: "mono", style: "font-size:32px;font-weight:600;color:var(--muted);width:56px;text-align:center", text: medal || `#${i + 1}` }),
         el("div", { style: "flex:1" }, [
           el("div", { class: "oswald", style: "font-size:26px;font-weight:600;color:var(--text)", text: rep.name }),
-          el("div", { class: "muted", style: "font-size:14px;margin-top:2px", text: `${rep.closeCount} close${rep.closeCount !== 1 ? "s" : ""} today · ${rep.arrivedCount} arrived` }),
+          el("div", { class: "muted", style: "font-size:14px;margin-top:2px", text: `${rep.closeCount} scheduled today · ${rep.arrivedCount} arrived` }),
         ]),
         el("div", { style: "text-align:right" }, [
           el("div", { class: "mono", style: "font-size:30px;font-weight:600;color:var(--amber)", text: money(rep.closedValue) }),
