@@ -555,10 +555,16 @@ async function renderLeaderboard(app) {
   let latestLeaderboardRequestId = 0;
   async function load() {
     const thisRequestId = ++latestLeaderboardRequestId;
-    let data;
+    let closingData, arrivalData;
     try {
       const todayEastern = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
-      data = await api(`/api/combined/salesrep-stats?period=day&date=${todayEastern}`);
+      // Two genuinely different questions, fetched separately: what they're closing
+      // today (regardless of when it's scheduled), and what's actually arrived today
+      // (real commission, only counting cars physically at the shop).
+      [closingData, arrivalData] = await Promise.all([
+        api(`/api/combined/salesrep-stats?period=day&date=${todayEastern}&dateBasis=closed`),
+        api(`/api/combined/salesrep-stats?period=day&date=${todayEastern}`),
+      ]);
     } catch (e) {
       if (thisRequestId !== latestLeaderboardRequestId) return;
       errorBanner.innerHTML = "";
@@ -567,10 +573,25 @@ async function renderLeaderboard(app) {
     }
     if (thisRequestId !== latestLeaderboardRequestId) return;
     errorBanner.innerHTML = "";
-    if (data.errors.length > 0) {
-      errorBanner.appendChild(el("div", { style: "color:var(--red);font-size:14px;margin-bottom:16px", text: `Not reachable right now: ${data.errors.map((e) => e.locationName).join(", ")}` }));
+    const allErrors = [...closingData.errors, ...arrivalData.errors];
+    if (allErrors.length > 0) {
+      errorBanner.appendChild(el("div", { style: "color:var(--red);font-size:14px;margin-bottom:16px", text: `Not reachable right now: ${[...new Set(allErrors.map((e) => e.locationName))].join(", ")}` }));
     }
-    const ranked = [...data.perRep].sort((a, b) => b.actualCommission - a.actualCommission);
+
+    // Merge both by rep name into one row each - every rep who appears in either list
+    // gets a row, defaulting to zero on whichever side they have no activity on.
+    const byName = {};
+    closingData.perRep.forEach((r) => { byName[r.name] = byName[r.name] || {}; byName[r.name].closing = r; });
+    arrivalData.perRep.forEach((r) => { byName[r.name] = byName[r.name] || {}; byName[r.name].arrival = r; });
+    const merged = Object.entries(byName).map(([name, { closing, arrival }]) => ({
+      name,
+      closeCount: closing ? closing.closeCount : 0,
+      closedValue: closing ? closing.closedValue : 0,
+      arrivedCount: arrival ? arrival.arrivedCount : 0,
+      actualCommission: arrival ? arrival.actualCommission : 0,
+    }));
+    const ranked = merged.sort((a, b) => b.actualCommission - a.actualCommission);
+
     list.innerHTML = "";
     if (ranked.length === 0) {
       list.appendChild(el("div", { class: "muted", style: "font-size:20px;text-align:center;margin-top:60px", text: "No activity yet today." }));
@@ -582,15 +603,18 @@ async function renderLeaderboard(app) {
         style: `display:flex;align-items:center;gap:24px;padding:20px 24px;margin-bottom:12px;background:${i === 0 ? "var(--cardAlt)" : "var(--card)"};border:0.5px solid ${i === 0 ? "var(--amber)" : "var(--border)"};border-radius:14px`,
       }, [
         el("div", { class: "mono", style: "font-size:32px;font-weight:600;color:var(--muted);width:56px;text-align:center", text: medal || `#${i + 1}` }),
-        el("div", { style: "flex:1" }, [
+        el("div", { style: "flex:1", }, [
           el("div", { class: "oswald", style: "font-size:26px;font-weight:600;color:var(--text)", text: rep.name }),
-          el("div", { class: "muted", style: "font-size:14px;margin-top:2px", text: `${rep.closeCount} scheduled today · ${rep.arrivedCount} arrived` }),
         ]),
-        el("div", { style: "text-align:right" }, [
-          el("div", { class: "mono", style: "font-size:30px;font-weight:600;color:var(--amber)", text: money(rep.closedValue) }),
-          el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.03em;margin-top:-2px", text: "CLOSED VALUE" }),
-          el("div", { class: "mono", style: "font-size:18px;font-weight:500;color:var(--green);margin-top:6px", text: money(rep.actualCommission) }),
-          el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.03em", text: "COMMISSION (CARS THAT SHOWED)" }),
+        el("div", { style: "text-align:center;width:180px;border-right:1px solid var(--border);padding-right:20px" }, [
+          el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.03em", text: "CLOSING TODAY" }),
+          el("div", { class: "mono", style: "font-size:24px;font-weight:600;color:var(--cyan);margin-top:2px", text: `${rep.closeCount}` }),
+          el("div", { class: "mono", style: "font-size:15px;color:var(--chrome)", text: money(rep.closedValue) }),
+        ]),
+        el("div", { style: "text-align:right;width:200px" }, [
+          el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.03em", text: "ARRIVED TODAY" }),
+          el("div", { class: "mono", style: "font-size:24px;font-weight:600;color:var(--amber);margin-top:2px", text: `${rep.arrivedCount}` }),
+          el("div", { class: "mono", style: "font-size:18px;font-weight:600;color:var(--green)", text: money(rep.actualCommission) }),
         ]),
       ]));
     });
