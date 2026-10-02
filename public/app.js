@@ -222,8 +222,11 @@ async function renderSettings(content) {
 
 async function renderCleanup(content) {
   const body = el("div");
+  let latestCleanupRequestId = 0;
   async function load() {
+    const thisRequestId = ++latestCleanupRequestId;
     const data = await api("/api/combined/cleanup-list");
+    if (thisRequestId !== latestCleanupRequestId) return;
     body.innerHTML = "";
     if (data.errors.length > 0) {
       body.appendChild(el("div", { class: "card", style: "border-color:var(--red)" }, [
@@ -428,15 +431,22 @@ async function renderCombined(content) {
 
   let goalsCache = [];
   let currentPeriodType = "month";
+  let latestRequestId = 0;
 
   async function load(params) {
     const p = params || picker.getParams();
-    currentPeriodType = p.period;
+    const thisRequestId = ++latestRequestId;
     const qs = new URLSearchParams(p).toString();
-    [statsCache, goalsCache] = await Promise.all([
+    const [newStats, newGoals] = await Promise.all([
       api(`/api/combined/salesrep-stats?${qs}`),
       api("/api/goals"),
     ]);
+    // If a newer request has started since this one began, a faster response already
+    // rendered more current data - discard this now-stale result instead of overwriting it.
+    if (thisRequestId !== latestRequestId) return;
+    currentPeriodType = p.period;
+    statsCache = newStats;
+    goalsCache = newGoals;
     renderLocationTabs();
     renderBody();
   }
@@ -542,16 +552,20 @@ async function renderLeaderboard(app) {
 
   const medalFor = (rank) => rank === 0 ? "🥇" : rank === 1 ? "🥈" : rank === 2 ? "🥉" : null;
 
+  let latestLeaderboardRequestId = 0;
   async function load() {
+    const thisRequestId = ++latestLeaderboardRequestId;
     let data;
     try {
       const todayEastern = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
       data = await api(`/api/combined/salesrep-stats?period=day&date=${todayEastern}`);
     } catch (e) {
+      if (thisRequestId !== latestLeaderboardRequestId) return;
       errorBanner.innerHTML = "";
       errorBanner.appendChild(el("div", { style: "color:var(--red);font-size:16px;margin-bottom:20px", text: "Couldn't load — retrying..." }));
       return;
     }
+    if (thisRequestId !== latestLeaderboardRequestId) return;
     errorBanner.innerHTML = "";
     if (data.errors.length > 0) {
       errorBanner.appendChild(el("div", { style: "color:var(--red);font-size:14px;margin-bottom:16px", text: `Not reachable right now: ${data.errors.map((e) => e.locationName).join(", ")}` }));
