@@ -12,6 +12,9 @@ const PHOTOS_DIR = path.join(DATA_DIR, "photos");
 if (!fs.existsSync(PHOTOS_DIR)) fs.mkdirSync(PHOTOS_DIR, { recursive: true });
 const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
+// Release label shown on screen so a half-updated deploy (one file replaced, not the other)
+// is obvious at a glance instead of just looking "broken". Bump this with each release.
+const BUILD = "2026-10-03-cash-menu";
 // Separate from WEBHOOK_SECRET - protects the read/write endpoints the combined sales rep
 // tracker app uses to pull stats and push Cleanup fixes. Never used by GHL at all.
 const CROSS_LOCATION_SECRET = process.env.CROSS_LOCATION_SECRET || "change-me-cross-location";
@@ -445,7 +448,11 @@ app.use("/api", (req, res, next) => {
   res.set("Cache-Control", "no-store, no-cache, must-revalidate");
   next();
 });
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static(path.join(__dirname, "public"), {
+  // Always re-check the app's own files with the server, so a redeploy takes effect on the
+  // very next open instead of a phone quietly running a stale copy of the old screen.
+  setHeaders: (res, filePath) => { if (/\.(js|html|css)$/.test(filePath)) res.setHeader("Cache-Control", "no-cache"); },
+}));
 
 const AUTH_COOKIE = "sbn_auth";
 const AUTH_MAX_AGE = 1000 * 60 * 60 * 24 * 365; // 1 year — stays logged in on a phone indefinitely
@@ -572,6 +579,9 @@ function requireAnyStaff(req, res, next) {
 }
 
 // ---------- session / login ----------
+// Public and harmless - just lets the screen confirm it's on the same release as the server.
+app.get("/api/version", (req, res) => res.json({ build: BUILD }));
+
 app.get("/api/session", (req, res) => {
   const db = loadDB();
   if (req.auth.role === "owner") return res.json({ role: "owner", shopLocation: SHOP_LOCATION_LABEL });
