@@ -14,6 +14,9 @@ const el = (tag, attrs = {}, children = []) => {
   (Array.isArray(children) ? children : [children]).forEach((c) => c && e.appendChild(c));
   return e;
 };
+// Must match BUILD in server.js - the header compares the two and flags a half-updated deploy.
+const UI_BUILD = "2026-10-03-cash-menu";
+
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -176,6 +179,20 @@ function render() {
     el("div", { style: "flex:1;min-width:0" }, [
       el("div", { class: "title oswald", text: "SBN Autostyling Tracker" }),
       el("div", { class: "subtitle", text: `Window tint · PPF · Ceramic coating — ${session.shopLocation || ""}` }),
+      (() => {
+        // Shows which release this screen is, and goes red if the server is on a different one.
+        // A network hiccup alone never triggers the warning - only a real answer that doesn't match.
+        const line = el("div", { class: "muted", style: "font-size:9.5px;margin-top:1px", text: `build ${UI_BUILD}` });
+        fetch("/api/version", { cache: "no-store" })
+          .then(async (r) => { let v = null; if (r.ok) { try { v = await r.json(); } catch (e) {} } return { reached: true, v }; })
+          .catch(() => ({ reached: false }))
+          .then(({ reached, v }) => {
+            if (!reached || (v && v.build === UI_BUILD)) return;
+            line.style.color = "var(--red)";
+            line.textContent = `\u26A0 screen ${UI_BUILD} \u00B7 server ${v && v.build ? v.build : "OLD"} \u2014 update both files`;
+          });
+        return line;
+      })(),
     ]),
     el("div", { style: "text-align:right;flex-shrink:0" }, [
       el("div", { style: "font-size:12.5px;font-weight:500", text: session.name || "Owner" }),
