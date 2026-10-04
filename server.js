@@ -290,4 +290,20 @@ app.post("/api/combined/cleanup-fix", requireOwner, async (req, res) => {
   }
 });
 
+// Password recovery that leaves all your data alone. Only someone with access to the hosting
+// account can set environment variables, so this can't be triggered from the website:
+// set RESET_OWNER_PASSWORD, let it redeploy, log in with that password, then DELETE the
+// variable (otherwise it re-applies on every restart). Locations and goals are untouched.
+if (process.env.RESET_OWNER_PASSWORD) {
+  const pw = String(process.env.RESET_OWNER_PASSWORD).trim();
+  if (pw.length >= 4) {
+    const db = loadDB();
+    db.ownerPasswordHash = hash(pw);
+    saveDB(db);
+    console.log("Owner password was reset from RESET_OWNER_PASSWORD. Remove that variable now so it doesn't re-apply on every restart.");
+  } else {
+    console.log("RESET_OWNER_PASSWORD is shorter than 4 characters - ignored.");
+  }
+}
+
 app.listen(PORT, () => console.log(`Combined rep tracker running on port ${PORT}`));
