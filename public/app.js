@@ -532,7 +532,7 @@ async function renderLeaderboard(app) {
   const header = el("div", { style: "display:flex;justify-content:space-between;align-items:baseline;margin-bottom:28px" }, [
     el("div", {}, [
       el("div", { class: "oswald", style: "font-size:34px;font-weight:600;color:var(--chrome);letter-spacing:0.02em", text: "TODAY'S LEADERBOARD" }),
-      el("div", { class: "muted", style: "font-size:14px;margin-top:4px", text: "All locations combined" }),
+      el("div", { class: "muted", style: "font-size:14px;margin-top:4px", text: "All locations combined \u00B7 ranked by deals closed today (total closed value breaks ties)" }),
     ]),
     clockEl,
   ]);
@@ -590,7 +590,11 @@ async function renderLeaderboard(app) {
       arrivedCount: arrival ? arrival.arrivedCount : 0,
       actualCommission: arrival ? arrival.actualCommission : 0,
     }));
-    const ranked = merged.sort((a, b) => b.actualCommission - a.actualCommission);
+    // Ranked by how many deals they closed today, with total closed value breaking ties -
+    // NOT by commission. Anyone with no closes today (only cars arriving from earlier deals)
+    // sorts below everyone who closed, ordered among themselves by what actually showed.
+    const ranked = merged.sort((a, b) =>
+      b.closeCount - a.closeCount || b.closedValue - a.closedValue || b.actualCommission - a.actualCommission || a.name.localeCompare(b.name));
 
     list.innerHTML = "";
     if (ranked.length === 0) {
