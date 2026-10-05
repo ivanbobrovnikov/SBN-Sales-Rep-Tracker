@@ -290,6 +290,51 @@ app.post("/api/combined/cleanup-fix", requireOwner, async (req, res) => {
   }
 });
 
+// ---------- Editing and adding jobs at a location ----------
+// Calls one of a location's cross-location endpoints and reports back plainly. A location that hasn't
+// been updated yet doesn't have these endpoints at all, which comes back as a web page rather than
+// JSON - so that gets a clear "needs the update" message instead of a confusing failure.
+async function callLocation(loc, path, body) {
+  const url = `${loc.url}${path}${path.includes("?") ? "&" : "?"}secret=${encodeURIComponent(loc.secret)}`;
+  const r = await fetch(url, { method: body ? "POST" : "GET", headers: { "Content-Type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(10000) });
+  let data = null;
+  try { data = await r.json(); } catch (e) {}
+  // Not JSON and either "not found" or a normal page = this isn't our API (an older tracker). A 5xx page is just an outage.
+  return { status: r.status, ok: r.ok, data, notOurApi: data === null && (r.status === 404 || r.ok) };
+}
+const NEEDS_UPDATE = (name) => `${name} needs the latest tracker update before jobs can be edited from here.`;
+
+app.get("/api/combined/salesreps", requireOwner, async (req, res) => {
+  const db = loadDB();
+  const out = await Promise.all(db.locations.map(async (loc) => {
+    const base = { locationId: loc.id, locationName: loc.name, salesReps: [] };
+    try {
+      const r = await callLocation(loc, "/api/cross-location/salesreps");
+      if (r.notOurApi) return { ...base, needsUpdate: true };
+      if (!r.ok) return { ...base, error: (r.data && r.data.error) || `HTTP ${r.status}` };
+      return { ...base, salesReps: r.data.salesReps || [] };
+    } catch (e) { return { ...base, error: e.message || "Unreachable" }; }
+  }));
+  res.json({ locations: out });
+});
+
+async function proxyWrite(req, res, path) {
+  const db = loadDB();
+  const { locationId, ...rest } = req.body;
+  const loc = db.locations.find((l) => l.id === locationId);
+  if (!loc) return res.status(404).json({ error: "Location not found." });
+  try {
+    const r = await callLocation(loc, path, rest);
+    if (r.notOurApi) return res.status(409).json({ error: NEEDS_UPDATE(loc.name), needsUpdate: true });
+    if (!r.ok) return res.status(r.status).json(r.data || { error: `HTTP ${r.status}` });
+    res.json(r.data || { ok: true });
+  } catch (e) {
+    res.status(502).json({ error: e.message || "Couldn't reach that location." });
+  }
+}
+app.post("/api/combined/job-edit", requireOwner, (req, res) => proxyWrite(req, res, "/api/cross-location/job-edit"));
+app.post("/api/combined/job-add", requireOwner, (req, res) => proxyWrite(req, res, "/api/cross-location/job-add"));
+
 // Password recovery that leaves all your data alone. Only someone with access to the hosting
 // account can set environment variables, so this can't be triggered from the website:
 // set RESET_OWNER_PASSWORD, let it redeploy, log in with that password, then DELETE the
