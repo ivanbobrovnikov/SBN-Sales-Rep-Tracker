@@ -5,7 +5,7 @@ async function api(path, opts = {}) {
     ...opts,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "Something went wrong.");
+  if (!res.ok) { const err = new Error(data.error || "Something went wrong."); err.data = data; err.status = res.status; throw err; }
   return data;
 }
 
@@ -68,7 +68,7 @@ function render() {
   renderPage(content);
 
   const bar = el("div", { class: "bottom-tabs" });
-  [["combined", "Combined", "📊"], ["leaderboard", "Leaderboard", "🏆"], ["cleanup", "Cleanup", "🧹"], ["settings", "Settings", "⚙️"]].forEach(([key, label, icon]) => {
+  [["combined", "Combined", "📊"], ["audit", "Audit", "🧾"], ["leaderboard", "Leaderboard", "🏆"], ["cleanup", "Cleanup", "🧹"], ["settings", "Settings", "⚙️"]].forEach(([key, label, icon]) => {
     bar.appendChild(el("button", {
       class: "bottom-tab" + (currentTab === key ? " active" : ""),
       onclick: () => { currentTab = key; render(); },
@@ -108,6 +108,7 @@ function renderLogin(app) {
 
 function renderPage(content) {
   if (currentTab === "combined") return renderCombined(content);
+  if (currentTab === "audit") return renderAudit(content);
   if (currentTab === "cleanup") return renderCleanup(content);
   if (currentTab === "settings") return renderSettings(content);
 }
@@ -307,8 +308,8 @@ function prettyRange(startYmd, endYmd) {
   return startYmd.slice(0, 4) === endYmd.slice(0, 4) ? `${fmt(startYmd)} – ${fmt(endYmd, true)}` : `${fmt(startYmd, true)} – ${fmt(endYmd, true)}`;
 }
 
-function renderSimplePeriodPicker(onChange) {
-  let period = "payperiod";
+function renderSimplePeriodPicker(onChange, initialPeriod = "payperiod") {
+  let period = initialPeriod;
   const today = easternToday();
   let payEnd = payPeriodEndFor(today);
   const dayInput = el("input", { type: "date", value: today, style: "display:none" });
@@ -356,19 +357,22 @@ function renderSimplePeriodPicker(onChange) {
     if (!problem) fire();
   }
 
+  function showFor(p) {
+    dayInput.style.display = p === "day" ? "" : "none";
+    weekInput.style.display = p === "week" ? "" : "none";
+    monthInput.style.display = p === "month" ? "" : "none";
+    yearInput.style.display = p === "year" ? "" : "none";
+    payWrap.style.display = p === "payperiod" ? "flex" : "none";
+    customWrap.style.display = p === "custom" ? "flex" : "none";
+    customNotice.style.display = p === "custom" ? "" : "none";
+  }
   const tabs = el("div", { style: "display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap" });
   [["payperiod", "Pay period"], ["day", "Day"], ["week", "Week"], ["month", "Month"], ["year", "Year"], ["custom", "Custom"]].forEach(([p, label]) => {
     const btn = el("button", { class: "tab-btn" + (p === period ? " active" : ""), text: label });
     btn.addEventListener("click", () => {
       period = p;
       Array.from(tabs.children).forEach((c) => c.classList.remove("active"));
-      dayInput.style.display = p === "day" ? "" : "none";
-      weekInput.style.display = p === "week" ? "" : "none";
-      monthInput.style.display = p === "month" ? "" : "none";
-      yearInput.style.display = p === "year" ? "" : "none";
-      payWrap.style.display = p === "payperiod" ? "flex" : "none";
-      customWrap.style.display = p === "custom" ? "flex" : "none";
-      customNotice.style.display = p === "custom" ? "" : "none";
+      showFor(p);
       btn.classList.add("active");
       if (p === "payperiod") renderPayLabel();
       if (p === "custom") fireCustom(); else fire(); // Custom now loads straight away too, instead of waiting for a date change
@@ -382,6 +386,7 @@ function renderSimplePeriodPicker(onChange) {
   const wrap = el("div", { class: "field", style: "max-width:400px" }, [
     el("label", { text: "Time period" }), tabs, dayInput, weekInput, monthInput, yearInput, payWrap, customWrap, customNotice,
   ]);
+  showFor(period);
   return { el: wrap, getParams: currentParams };
 }
 
@@ -631,8 +636,8 @@ async function renderCombined(content) {
       }
       views.push(view);
     });
-    // Same order as the leaderboard: most deals closed, then closed value, then commission.
-    return views.sort((x, y) => y.closing.count - x.closing.count || y.closing.value - x.closing.value || y.actualCommission - x.actualCommission || x.name.localeCompare(y.name));
+    // Same order as the leaderboard: biggest closed value, then most deals, then commission.
+    return views.sort((x, y) => y.closing.value - x.closing.value || y.closing.count - x.closing.count || y.actualCommission - x.actualCommission || x.name.localeCompare(y.name));
   }
 
   function renderBody() {
@@ -667,6 +672,271 @@ async function renderCombined(content) {
   await load();
 }
 
+// ---------- Audit: every deal closed in a period, car by car - and fixable ----------
+// Eastern wall-clock time as "YYYY-MM-DDTHH:mm": the format a datetime-local box wants, and what the
+// shops read back as Eastern time.
+function etWall(iso) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(iso)).map((x) => [x.type, x.value]));
+  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
+}
+const AUDIT_SERVICES = ["Window Tint", "Ceramic Coating", "PPF"];
+const AUDIT_STATUSES = [["pending", "Pending"], ["arrived", "Arrived"], ["no_show", "No-show"], ["cancelled", "Cancelled"]];
+const AUDIT_SELECT_STYLE = "max-width:100%;background:var(--panel);border:0.5px solid var(--border);border-radius:7px;color:var(--text);padding:6px 8px;font-size:13px";
+
+async function renderAudit(content) {
+  const picker = renderSimplePeriodPicker((params) => load(params), "day");
+  const flash = el("div", { class: "notice", style: "margin:0 0 10px" });
+  const locationTabs = el("div", { style: "display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap" });
+  const addWrap = el("div");
+  const body = el("div");
+  let data = null, repsInfo = [], activeLocation = "combined", latestRequestId = 0, lastParams = null;
+
+  const say = (text, ok = true) => { flash.className = "notice " + (ok ? "ok" : "err"); flash.textContent = text; };
+  const repsFor = (locationId) => repsInfo.find((l) => l.locationId === locationId) || { salesReps: [] };
+  const fieldRow = (label, control) => el("div", { style: "display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap" }, [el("span", { class: "muted", style: "font-size:11.5px;min-width:118px", text: label }), control]);
+  const sum = (list, f) => list.reduce((a, x) => a + f(x), 0);
+
+  async function loadReps() { try { repsInfo = (await api("/api/combined/salesreps")).locations; } catch (e) { repsInfo = []; } }
+
+  async function load(params) {
+    const p = params || lastParams || picker.getParams();
+    lastParams = p;
+    const thisId = ++latestRequestId;
+    let fresh;
+    try {
+      fresh = await api(`/api/combined/salesrep-stats?${new URLSearchParams(p).toString()}&dateBasis=closed`);
+    } catch (e) {
+      if (thisId !== latestRequestId) return;
+      body.innerHTML = "";
+      body.appendChild(el("div", { class: "card", style: "border-color:var(--red)" }, [el("div", { style: "color:var(--red);font-size:12.5px", text: `Couldn't load: ${e.message || "something went wrong"}. Change the period or reload to try again.` })]));
+      return;
+    }
+    if (thisId !== latestRequestId) return; // a newer request already won - drop this stale answer
+    data = fresh;
+    renderLocationTabs();
+    renderBody();
+  }
+
+  function renderLocationTabs() {
+    locationTabs.innerHTML = "";
+    [["combined", "All locations"], ...data.locationsQueried.map((n) => [n, n])].forEach(([key, label]) => {
+      locationTabs.appendChild(el("button", { class: "tab-btn" + (activeLocation === key ? " active" : ""), onclick: () => { activeLocation = key; renderLocationTabs(); renderBody(); }, text: label }));
+    });
+  }
+
+  function closesInView() {
+    const rows = [];
+    data.perRep.forEach((r) => r.closes.forEach((c) => { if (activeLocation === "combined" || c.locationName === activeLocation) rows.push({ ...c, repName: r.name }); }));
+    return rows;
+  }
+
+  function renderBody() {
+    body.innerHTML = "";
+    if (data.errors && data.errors.length > 0) {
+      body.appendChild(el("div", { class: "card", style: "border-color:var(--red)" }, [
+        el("div", { style: "color:var(--red);font-size:12.5px", text: `Couldn't reach: ${data.errors.map((e) => `${e.locationName} (${e.error})`).join(", ")}` }),
+        el("div", { class: "muted", style: "font-size:10.5px;margin-top:4px", text: "Those closes aren't in the list below until it's reachable again." }),
+      ]));
+    }
+    const rows = closesInView();
+    body.appendChild(el("div", { class: "metric-grid" }, [
+      ["Deals closed", rows.length, "var(--cyan)"], ["Closed value", money(sum(rows, (c) => c.basePrice)), "var(--amber)"],
+      ["Commission if all show", money(sum(rows, (c) => c.commissionAmount || 0)), "var(--green)"],
+      ["Earned so far", money(sum(rows.filter((c) => c.status === "arrived"), (c) => c.commissionAmount || 0)), "var(--green)"],
+    ].map(([label, value, color]) => el("div", { class: "metric" }, [el("div", { class: "metric-label", text: label }), el("div", { class: "metric-value", style: `color:${color}`, text: value })]))));
+    body.appendChild(el("div", { class: "muted", style: "font-size:11px;margin:-8px 0 14px", text: "Every deal closed in this period, by when it was closed, whatever day the car comes in. Tap Edit on any line to fix it. Jobs with no sales rep are in Cleanup." }));
+    if (rows.length === 0) { body.appendChild(el("div", { class: "muted", text: "Nothing closed in this period." })); return; }
+
+    const byRep = {};
+    rows.forEach((c) => { (byRep[c.repName] = byRep[c.repName] || []).push(c); });
+    Object.entries(byRep)
+      .map(([name, list]) => ({ name, list: list.sort((a, b) => (a.closedAt < b.closedAt ? -1 : 1)), value: sum(list, (c) => c.basePrice) }))
+      .sort((a, b) => b.value - a.value || b.list.length - a.list.length || a.name.localeCompare(b.name))
+      .forEach((g) => body.appendChild(renderGroup(g)));
+  }
+
+  function renderGroup(g) {
+    const rowsWrap = el("div");
+    g.list.forEach((c) => rowsWrap.appendChild(renderRow(c)));
+    const projected = sum(g.list, (c) => c.commissionAmount || 0);
+    const earned = sum(g.list.filter((c) => c.status === "arrived"), (c) => c.commissionAmount || 0);
+    const toggle = el("button", { class: "ghost", style: "font-size:11px;padding:3px 9px", text: "Hide", onclick: () => {
+      const hidden = rowsWrap.style.display === "none";
+      rowsWrap.style.display = hidden ? "" : "none";
+      toggle.textContent = hidden ? "Hide" : "Show";
+    } });
+    return el("div", { class: "card" }, [
+      el("div", { class: "row" }, [
+        el("div", {}, [
+          el("div", { style: "font-weight:500;font-size:16px", text: g.name }),
+          el("div", { class: "muted", style: "font-size:12px", text: `${g.list.length} deal${g.list.length !== 1 ? "s" : ""} closed · ${money(g.value)} · ${money(projected)} if all show · ${money(earned)} earned` }),
+        ]),
+        toggle,
+      ]),
+      rowsWrap,
+    ]);
+  }
+
+  function renderRow(c) {
+    const slot = el("div");
+    const statusColor = c.status === "arrived" ? "var(--green)" : c.status === "no_show" ? "var(--red)" : "var(--sub)";
+    const commText = c.status === "arrived" ? `+${money(c.commissionAmount)} earned` : c.status === "no_show" ? "no-show, earns nothing" : c.status === "cancelled" ? "cancelled" : `${money(c.commissionAmount)} if it shows`;
+    const editBtn = el("button", { class: "ghost", style: "font-size:11px;padding:3px 9px", text: "Edit", onclick: () => {
+      if (slot.firstChild) { slot.innerHTML = ""; return; }
+      buildEditor(c, slot);
+    } });
+    return el("div", { style: "padding:9px 0;border-top:0.5px solid var(--border);margin-top:8px" }, [
+      el("div", { class: "row", style: "align-items:flex-start" }, [
+        el("div", {}, [
+          el("div", { style: "font-size:13.5px;font-weight:500", text: c.car }),
+          el("div", { class: "muted", style: "font-size:11.5px", text: [c.customerName, c.locationName].filter(Boolean).join(" · ") }),
+        ]),
+        el("div", { style: "text-align:right" }, [
+          el("div", { class: "mono", style: "font-size:14px", text: money(c.basePrice) }),
+          el("div", { style: `font-size:10.5px;color:${statusColor}`, text: c.status }),
+        ]),
+      ]),
+      el("div", { class: "muted", style: "font-size:11px;margin-top:3px", text: `Closed ${formatDateTime(c.closedAt)} · ${c.duringHours ? "in-hours" : "after-hours"} · car scheduled ${formatDateTime(c.date)} · ${commText}` }),
+      el("div", { style: "margin-top:6px" }, [editBtn]),
+      slot,
+    ]);
+  }
+
+  function buildEditor(c, slot) {
+    const info = repsFor(c.locationId);
+    const panel = el("div", { style: "margin-top:8px;padding:10px 12px;background:var(--panel);border:0.5px solid var(--border);border-radius:8px" });
+    slot.appendChild(panel);
+    if (info.needsUpdate) {
+      panel.appendChild(el("div", { style: "color:var(--red);font-size:12.5px", text: `${c.locationName} needs the latest tracker update before jobs can be edited from here.` }));
+      return;
+    }
+    const closedIn = el("input", { type: "datetime-local", value: etWall(c.closedAt), style: "max-width:210px" });
+    const dateIn = el("input", { type: "datetime-local", value: etWall(c.date), style: "max-width:210px" });
+    const carIn = el("input", { type: "text", value: c.car, style: "max-width:100%" });
+    const priceIn = el("input", { type: "number", step: "0.01", min: "0", value: c.basePrice, style: "max-width:130px" });
+    const svcOptions = [...new Set([...AUDIT_SERVICES, c.baseService].filter(Boolean))];
+    const svcIn = el("select", { style: AUDIT_SELECT_STYLE }, [el("option", { value: "", text: "(not set)" }), ...svcOptions.map((v) => el("option", { value: v, text: v }))]);
+    svcIn.value = c.baseService || "";
+    const statusIn = el("select", { style: AUDIT_SELECT_STYLE }, AUDIT_STATUSES.map(([v, t]) => el("option", { value: v, text: t })));
+    statusIn.value = c.status;
+    const currentRep = info.salesReps.find((r) => r.name === c.repName);
+    const repIn = el("select", { style: AUDIT_SELECT_STYLE }, [
+      ...(currentRep ? [] : [el("option", { value: "", text: `${c.repName} (unchanged)` })]),
+      ...info.salesReps.map((r) => el("option", { value: r.id, text: r.name })),
+      el("option", { value: "__walkin__", text: "Walk-in (no rep commission)" }),
+      el("option", { value: "__online__", text: "Online booking (no rep)" }),
+    ]);
+    repIn.value = currentRep ? currentRep.id : "";
+    const msg = el("div", { style: "font-size:12px;margin-top:6px" });
+    const saveBtn = el("button", { class: "primary", text: "Save", onclick: async () => {
+      const changes = {};
+      if (closedIn.value && closedIn.value !== etWall(c.closedAt)) changes.closedAt = closedIn.value;
+      if (dateIn.value && dateIn.value !== etWall(c.date)) changes.date = dateIn.value;
+      if (carIn.value.trim() && carIn.value.trim() !== c.car) changes.car = carIn.value.trim();
+      if (priceIn.value !== "" && parseFloat(priceIn.value) !== c.basePrice) changes.basePrice = priceIn.value;
+      if (svcIn.value && svcIn.value !== (c.baseService || "")) changes.baseService = svcIn.value;
+      if (statusIn.value !== c.status) changes.status = statusIn.value;
+      if (repIn.value && repIn.value !== (currentRep ? currentRep.id : "")) {
+        if (repIn.value === "__walkin__") changes.isWalkIn = true;
+        else if (repIn.value === "__online__") changes.isOnlineBooking = true;
+        else changes.salesRepId = repIn.value;
+      }
+      if (Object.keys(changes).length === 0) { msg.style.color = "var(--sub)"; msg.textContent = "Nothing changed."; return; }
+      saveBtn.disabled = true; msg.style.color = "var(--sub)"; msg.textContent = "Saving…";
+      try {
+        await api("/api/combined/job-edit", { method: "POST", body: JSON.stringify({ locationId: c.locationId, saleId: c.id, ...changes }) });
+        await load();
+        const stillHere = closesInView().some((x) => x.id === c.id && x.locationId === c.locationId);
+        say(stillHere ? "Saved." : "Saved. That job no longer falls in this view; check its new date, rep or status.");
+      } catch (e) {
+        saveBtn.disabled = false; msg.style.color = "var(--red)"; msg.textContent = e.message || "Couldn't save.";
+      }
+    } });
+    panel.appendChild(el("div", { class: "muted", style: "font-size:11px;margin-bottom:8px", text: "Times are Eastern. Changing the closing time changes which day it counts on and whether the in-hours or after-hours rate applies." }));
+    panel.appendChild(fieldRow("Closed at", closedIn));
+    panel.appendChild(fieldRow("Car scheduled", dateIn));
+    panel.appendChild(fieldRow("Title", carIn));
+    panel.appendChild(fieldRow("Price", priceIn));
+    panel.appendChild(fieldRow("Service", svcIn));
+    panel.appendChild(fieldRow("Sales rep", repIn));
+    panel.appendChild(fieldRow("Status", statusIn));
+    panel.appendChild(el("div", { style: "display:flex;gap:8px;margin-top:8px" }, [saveBtn, el("button", { class: "ghost", text: "Cancel", onclick: () => { slot.innerHTML = ""; } })]));
+    panel.appendChild(msg);
+  }
+
+  function toggleAddForm() {
+    if (addWrap.firstChild) { addWrap.innerHTML = ""; return; }
+    if (repsInfo.length === 0) { say("Couldn't load your locations just now. Reload and try again.", false); return; }
+    const card = el("div", { class: "card" });
+    const locSel = el("select", { style: AUDIT_SELECT_STYLE }, repsInfo.map((l) => el("option", { value: l.locationId, text: l.locationName })));
+    const customerIn = el("input", { type: "text", placeholder: "Customer name", style: "max-width:100%" });
+    const carIn = el("input", { type: "text", placeholder: "Car / title, e.g. FK 2020 Tesla Model 3 Full Tint", style: "max-width:100%" });
+    const apptIn = el("input", { type: "datetime-local", style: "max-width:210px" });
+    const closedIn = el("input", { type: "datetime-local", value: etWall(new Date().toISOString()), style: "max-width:210px" });
+    const priceIn = el("input", { type: "number", step: "0.01", min: "0", placeholder: "0.00", style: "max-width:130px" });
+    const svcSel = el("select", { style: AUDIT_SELECT_STYLE }, [el("option", { value: "", text: "(not set)" }), ...AUDIT_SERVICES.map((v) => el("option", { value: v, text: v }))]);
+    const statusSel = el("select", { style: AUDIT_SELECT_STYLE }, [["pending", "Pending"], ["arrived", "Arrived"], ["no_show", "No-show"]].map(([v, t]) => el("option", { value: v, text: t })));
+    const repSel = el("select", { style: AUDIT_SELECT_STYLE });
+    const msg = el("div", { style: "font-size:12px;margin-top:8px" });
+    const extra = el("div", { style: "margin-top:6px" });
+    function fillReps() {
+      const info = repsFor(locSel.value);
+      repSel.innerHTML = "";
+      [el("option", { value: "", text: "Choose a sales rep…" }), ...info.salesReps.map((r) => el("option", { value: r.id, text: r.name })),
+        el("option", { value: "__walkin__", text: "Walk-in (no rep commission)" }), el("option", { value: "__online__", text: "Online booking (no rep)" })].forEach((o) => repSel.appendChild(o));
+      msg.style.color = "var(--red)";
+      msg.textContent = info.needsUpdate ? `${info.locationName} needs the latest tracker update before jobs can be added from here.` : "";
+    }
+    locSel.addEventListener("change", fillReps);
+    fillReps();
+    const bad = (t) => { msg.style.color = "var(--red)"; msg.textContent = t; };
+    async function submit(force) {
+      extra.innerHTML = "";
+      if (!carIn.value.trim()) return bad("Enter the car / title.");
+      if (!apptIn.value) return bad("Enter the appointment date and time.");
+      if (!repSel.value) return bad("Choose a sales rep, or Walk-in / Online booking.");
+      const payload = { locationId: locSel.value, customerName: customerIn.value.trim(), car: carIn.value.trim(), date: apptIn.value, closedAt: closedIn.value || undefined, basePrice: priceIn.value, baseService: svcSel.value, status: statusSel.value, force: !!force };
+      if (repSel.value === "__walkin__") payload.isWalkIn = true; else if (repSel.value === "__online__") payload.isOnlineBooking = true; else payload.salesRepId = repSel.value;
+      msg.style.color = "var(--sub)"; msg.textContent = "Adding…";
+      try {
+        const res = await api("/api/combined/job-add", { method: "POST", body: JSON.stringify(payload) });
+        addWrap.innerHTML = "";
+        await load();
+        const inView = closesInView().some((x) => x.id === res.id);
+        say(inView ? "Added. It's in the list below." : "Added. Its closing time falls outside this period, so switch the period to see it.");
+      } catch (e) {
+        if (e.data && e.data.duplicate) {
+          bad(e.message);
+          extra.appendChild(el("button", { class: "ghost", text: "Add anyway", onclick: () => submit(true) }));
+        } else bad(e.message || "Couldn't add that job.");
+      }
+    }
+    card.appendChild(el("div", { style: "font-weight:500;margin-bottom:4px", text: "Add a missing job" }));
+    card.appendChild(el("div", { class: "muted", style: "font-size:11px;margin-bottom:10px", text: "Only for a job that never reached the tracker. Set the closing time to when the deal was actually closed; that decides the day it counts on and the commission rate." }));
+    card.appendChild(fieldRow("Location", locSel));
+    card.appendChild(fieldRow("Customer", customerIn));
+    card.appendChild(fieldRow("Title", carIn));
+    card.appendChild(fieldRow("Car scheduled", apptIn));
+    card.appendChild(fieldRow("Closed at", closedIn));
+    card.appendChild(fieldRow("Price", priceIn));
+    card.appendChild(fieldRow("Service", svcSel));
+    card.appendChild(fieldRow("Sales rep", repSel));
+    card.appendChild(fieldRow("Status", statusSel));
+    card.appendChild(el("div", { style: "display:flex;gap:8px;margin-top:8px" }, [el("button", { class: "primary", text: "Add job", onclick: () => submit(false) }), el("button", { class: "ghost", text: "Cancel", onclick: () => { addWrap.innerHTML = ""; } })]));
+    card.appendChild(msg);
+    card.appendChild(extra);
+    addWrap.appendChild(card);
+  }
+
+  content.appendChild(picker.el);
+  content.appendChild(locationTabs);
+  content.appendChild(el("div", { style: "margin-bottom:12px" }, [el("button", { class: "ghost", text: "＋ Add a missing job", onclick: toggleAddForm })]));
+  content.appendChild(addWrap);
+  content.appendChild(flash);
+  content.appendChild(body);
+  await Promise.all([loadReps(), load()]);
+}
+
 async function renderLeaderboard(app) {
   const wrap = el("div", { style: "background:var(--bg);min-height:100vh;padding:32px 40px" });
   const exitBtn = el("button", { class: "ghost", style: "position:fixed;top:16px;right:16px;z-index:10", onclick: () => { currentTab = "combined"; render(); }, text: "✕ Exit" });
@@ -674,7 +944,7 @@ async function renderLeaderboard(app) {
   const header = el("div", { style: "display:flex;justify-content:space-between;align-items:baseline;margin-bottom:28px" }, [
     el("div", {}, [
       el("div", { class: "oswald", style: "font-size:34px;font-weight:600;color:var(--chrome);letter-spacing:0.02em", text: "TODAY'S LEADERBOARD" }),
-      el("div", { class: "muted", style: "font-size:14px;margin-top:4px", text: "All locations combined \u00B7 ranked by deals closed today (total closed value breaks ties)" }),
+      el("div", { class: "muted", style: "font-size:14px;margin-top:4px", text: "All locations combined \u00B7 ranked by total value closed today" }),
     ]),
     clockEl,
   ]);
@@ -732,11 +1002,12 @@ async function renderLeaderboard(app) {
       arrivedCount: arrival ? arrival.arrivedCount : 0,
       actualCommission: arrival ? arrival.actualCommission : 0,
     }));
-    // Ranked by how many deals they closed today, with total closed value breaking ties -
-    // NOT by commission. Anyone with no closes today (only cars arriving from earlier deals)
-    // sorts below everyone who closed, ordered among themselves by what actually showed.
+    // Ranked by the total VALUE they closed today - not by commission, and not by how many deals.
+    // A tie on value goes to whoever closed more deals. Anyone with nothing closed today (only
+    // cars arriving from earlier deals) sorts below everyone who closed, ordered among themselves
+    // by what actually showed.
     const ranked = merged.sort((a, b) =>
-      b.closeCount - a.closeCount || b.closedValue - a.closedValue || b.actualCommission - a.actualCommission || a.name.localeCompare(b.name));
+      b.closedValue - a.closedValue || b.closeCount - a.closeCount || b.actualCommission - a.actualCommission || a.name.localeCompare(b.name));
 
     list.innerHTML = "";
     if (ranked.length === 0) {
@@ -754,8 +1025,8 @@ async function renderLeaderboard(app) {
         ]),
         el("div", { style: "text-align:center;width:180px;border-right:1px solid var(--border);padding-right:20px" }, [
           el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.03em", text: "CLOSING TODAY" }),
-          el("div", { class: "mono", style: "font-size:24px;font-weight:600;color:var(--cyan);margin-top:2px", text: `${rep.closeCount}` }),
-          el("div", { class: "mono", style: "font-size:15px;color:var(--chrome)", text: money(rep.closedValue) }),
+          el("div", { class: "mono", style: "font-size:24px;font-weight:600;color:var(--cyan);margin-top:2px", text: money(rep.closedValue) }),
+          el("div", { class: "mono", style: "font-size:15px;color:var(--chrome)", text: `${rep.closeCount} deal${rep.closeCount !== 1 ? "s" : ""}` }),
         ]),
         el("div", { style: "text-align:right;width:200px" }, [
           el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.03em", text: "ARRIVED TODAY" }),
