@@ -281,19 +281,63 @@ async function renderCleanup(content) {
   await load();
 }
 
+// Today's calendar date in Eastern time. The shops run on Eastern, but toISOString() is UTC,
+// which rolls over to "tomorrow" around 8pm Eastern - so a picker built on it opened the Day
+// view on an empty future date every evening.
+function easternToday() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+}
+
+// Pay periods are 14 days, Thursday through Wednesday, repeating every two weeks - the same
+// schedule the shops' own Payroll uses. It's anchored on a Wednesday that ENDS a period (Aug 26,
+// 2026), so Sep 24 - Oct 7 is followed by Oct 8 - Oct 21, then Oct 22 - Nov 4, and so on. A
+// period rolls over at the end of its last day, Eastern time.
+const PAY_PERIOD_END_ANCHOR = "2026-08-26";
+const DAY_MS = 86400000;
+const noonMs = (ymd) => Date.parse(ymd + "T12:00:00Z"); // noon sidesteps any day-boundary or DST ambiguity
+const toYmd = (ms) => new Date(ms).toISOString().slice(0, 10);
+function shiftYmd(ymd, days) { return toYmd(noonMs(ymd) + days * DAY_MS); }
+function payPeriodEndFor(ymd) {
+  const daysFromAnchor = Math.round((noonMs(ymd) - noonMs(PAY_PERIOD_END_ANCHOR)) / DAY_MS);
+  return shiftYmd(PAY_PERIOD_END_ANCHOR, Math.ceil(daysFromAnchor / 14) * 14);
+}
+const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function prettyRange(startYmd, endYmd) {
+  const fmt = (ymd, withYear) => { const [y, m, d] = ymd.split("-").map(Number); return `${MONTH_ABBR[m - 1]} ${d}${withYear ? `, ${y}` : ""}`; };
+  return startYmd.slice(0, 4) === endYmd.slice(0, 4) ? `${fmt(startYmd)} – ${fmt(endYmd, true)}` : `${fmt(startYmd, true)} – ${fmt(endYmd, true)}`;
+}
+
 function renderSimplePeriodPicker(onChange) {
-  let period = "month";
-  const today = new Date().toISOString().slice(0, 10);
+  let period = "payperiod";
+  const today = easternToday();
+  let payEnd = payPeriodEndFor(today);
   const dayInput = el("input", { type: "date", value: today, style: "display:none" });
   const weekInput = el("input", { type: "date", value: today, style: "display:none" });
-  const monthInput = el("input", { type: "month", value: today.slice(0, 7) });
-  const yearInput = el("input", { type: "number", value: String(new Date().getFullYear()), style: "display:none;max-width:100px" });
-  const customStart = el("input", { type: "date", value: today, style: "display:none;max-width:150px" });
-  const customEnd = el("input", { type: "date", value: today, style: "display:none;max-width:150px" });
-  const customWrap = el("div", { style: "display:none;gap:8px;align-items:center" }, [
+  const monthInput = el("input", { type: "month", value: today.slice(0, 7), style: "display:none" });
+  const yearInput = el("input", { type: "number", value: today.slice(0, 4), style: "display:none;max-width:100px" });
+
+  // Pay period: the period containing today, with back/forward arrows (never past the current one).
+  const payLabel = el("span", { style: "font-size:13px;flex:1;text-align:center" });
+  const payPrev = el("button", { class: "ghost", text: "◀", "aria-label": "Previous pay period" });
+  const payNext = el("button", { class: "ghost", text: "▶", "aria-label": "Next pay period" });
+  const payWrap = el("div", { style: "display:flex;gap:8px;align-items:center" }, [payPrev, payLabel, payNext]);
+  function renderPayLabel() {
+    const currentEnd = payPeriodEndFor(easternToday());
+    payLabel.textContent = prettyRange(shiftYmd(payEnd, -13), payEnd) + (payEnd === currentEnd ? " · current" : "");
+    payNext.disabled = payEnd >= currentEnd;
+  }
+  renderPayLabel();
+
+  // Custom starts out on the current pay period so it opens on something meaningful.
+  const customStart = el("input", { type: "date", value: shiftYmd(payEnd, -13), style: "max-width:150px" });
+  const customEnd = el("input", { type: "date", value: payEnd, style: "max-width:150px" });
+  const customWrap = el("div", { style: "display:none;gap:8px;align-items:center;flex-wrap:wrap" }, [
     el("span", { class: "muted", style: "font-size:12px", text: "From" }), customStart, el("span", { class: "muted", style: "font-size:12px", text: "to" }), customEnd,
   ]);
+  const customNotice = el("div", { class: "muted", style: "display:none;font-size:12px;margin-top:6px" });
+
   function currentParams() {
+    if (period === "payperiod") return { period: "payperiod", date: payEnd };
     if (period === "day") return { period, date: dayInput.value };
     if (period === "week") return { period, date: weekInput.value };
     if (period === "year") return { period, date: `${yearInput.value}-01-01` };
@@ -301,9 +345,20 @@ function renderSimplePeriodPicker(onChange) {
     return { period: "month", month: monthInput.value };
   }
   function fire() { onChange(currentParams()); }
+
+  // A custom range is checked before it's sent: a backwards or half-empty range used to come
+  // back as a blank "No sales rep activity" with no clue why.
+  function fireCustom() {
+    const problem = !customStart.value || !customEnd.value ? "Pick both dates." : customStart.value > customEnd.value ? "The end date is before the start date." : null;
+    customNotice.style.display = "";
+    customNotice.textContent = problem || `Showing ${prettyRange(customStart.value, customEnd.value)}`;
+    customNotice.style.color = problem ? "var(--red)" : "var(--muted)";
+    if (!problem) fire();
+  }
+
   const tabs = el("div", { style: "display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap" });
-  [["day", "Day"], ["week", "Week"], ["month", "Month"], ["year", "Year"], ["custom", "Custom"]].forEach(([p, label]) => {
-    const btn = el("button", { class: "tab-btn" + (p === period ? " active" : "") , text: label });
+  [["payperiod", "Pay period"], ["day", "Day"], ["week", "Week"], ["month", "Month"], ["year", "Year"], ["custom", "Custom"]].forEach(([p, label]) => {
+    const btn = el("button", { class: "tab-btn" + (p === period ? " active" : ""), text: label });
     btn.addEventListener("click", () => {
       period = p;
       Array.from(tabs.children).forEach((c) => c.classList.remove("active"));
@@ -311,23 +366,34 @@ function renderSimplePeriodPicker(onChange) {
       weekInput.style.display = p === "week" ? "" : "none";
       monthInput.style.display = p === "month" ? "" : "none";
       yearInput.style.display = p === "year" ? "" : "none";
+      payWrap.style.display = p === "payperiod" ? "flex" : "none";
       customWrap.style.display = p === "custom" ? "flex" : "none";
+      customNotice.style.display = p === "custom" ? "" : "none";
       btn.classList.add("active");
-      if (p !== "custom") fire();
+      if (p === "payperiod") renderPayLabel();
+      if (p === "custom") fireCustom(); else fire(); // Custom now loads straight away too, instead of waiting for a date change
     });
     tabs.appendChild(btn);
   });
+  payPrev.addEventListener("click", () => { payEnd = shiftYmd(payEnd, -14); renderPayLabel(); fire(); });
+  payNext.addEventListener("click", () => { if (payEnd < payPeriodEndFor(easternToday())) { payEnd = shiftYmd(payEnd, 14); renderPayLabel(); fire(); } });
   [dayInput, weekInput, monthInput, yearInput].forEach((inp) => inp.addEventListener("change", fire));
-  [customStart, customEnd].forEach((inp) => inp.addEventListener("change", () => { if (period === "custom") fire(); }));
-  const wrap = el("div", { class: "field", style: "max-width:340px" }, [
-    el("label", { text: "Time period" }), tabs, dayInput, weekInput, monthInput, yearInput, customWrap,
+  [customStart, customEnd].forEach((inp) => inp.addEventListener("change", () => { if (period === "custom") fireCustom(); }));
+  const wrap = el("div", { class: "field", style: "max-width:400px" }, [
+    el("label", { text: "Time period" }), tabs, dayInput, weekInput, monthInput, yearInput, payWrap, customWrap, customNotice,
   ]);
   return { el: wrap, getParams: currentParams };
 }
 
+// Deals CLOSED and cars ARRIVED are two genuinely different questions, so Combined shows both
+// side by side, exactly like the leaderboard: what a rep closed in the period (by close date, no
+// matter what day the car comes in) and what actually arrived in the period (by appointment
+// date - the cars that earn real commission, matching each shop's own Payroll).
 function renderGoalProgress(rep, goal) {
   if (!goal) return null;
-  const current = goal.metric === "commission" ? rep.actualCommission : goal.metric === "value" ? rep.closedValue : rep.closeCount;
+  // Closes and value goals count deals actually closed in the period; commission goals count
+  // real commission from cars that showed.
+  const current = goal.metric === "commission" ? rep.actualCommission : goal.metric === "value" ? rep.closing.value : rep.closing.count;
   const pct = Math.min(100, Math.round((current / goal.target) * 100));
   const displayCurrent = goal.metric === "closes" ? current : money(current);
   const displayTarget = goal.metric === "closes" ? goal.target : money(goal.target);
@@ -344,24 +410,33 @@ function renderGoalProgress(rep, goal) {
 
 function renderRepCard(rep, showLocationBreakdown, goal) {
   const detailWrap = el("div", { style: "display:none;margin-top:10px" });
+  const sectionLabel = (text, extra) => el("div", { class: "muted", style: `font-size:10.5px;font-weight:600;margin:8px 0 4px;${extra || ""}`, text });
   function buildDetail() {
     detailWrap.innerHTML = "";
+    if (showLocationBreakdown && rep.closing.closes.length > 0) {
+      const byLoc = {};
+      rep.closing.closes.forEach((c) => { const l = (byLoc[c.locationName] = byLoc[c.locationName] || { count: 0, value: 0 }); l.count += 1; l.value += c.basePrice; });
+      detailWrap.appendChild(sectionLabel("CLOSED BY LOCATION"));
+      Object.entries(byLoc).forEach(([name, l]) => detailWrap.appendChild(el("div", { class: "row", style: "font-size:12px;margin-bottom:3px" }, [
+        el("span", { text: `${name} — ${l.count} closed` }), el("span", { class: "mono", text: money(l.value) }),
+      ])));
+    }
     if (showLocationBreakdown && rep.byLocation.length > 0) {
-      detailWrap.appendChild(el("div", { class: "muted", style: "font-size:10.5px;font-weight:600;margin-bottom:4px", text: "BY LOCATION" }));
+      detailWrap.appendChild(sectionLabel("APPOINTMENTS BY LOCATION"));
       rep.byLocation.forEach((l) => detailWrap.appendChild(el("div", { class: "row", style: "font-size:12px;margin-bottom:3px" }, [
-        el("span", { text: `${l.locationName} — ${l.closeCount} close${l.closeCount !== 1 ? "s" : ""}, ${l.arrivedCount} arrived` }),
+        el("span", { text: `${l.locationName} — ${l.closeCount} appointment${l.closeCount !== 1 ? "s" : ""}, ${l.arrivedCount} arrived` }),
         el("span", { class: "mono", text: money(l.closedValue) }),
       ])));
     }
     const services = Object.entries(rep.byService || {});
     if (services.length > 0) {
-      detailWrap.appendChild(el("div", { class: "muted", style: "font-size:10.5px;font-weight:600;margin:8px 0 4px", text: "BY SERVICE" }));
+      detailWrap.appendChild(sectionLabel("BY SERVICE"));
       services.forEach(([svc, count]) => detailWrap.appendChild(el("div", { class: "row", style: "font-size:12px;margin-bottom:3px" }, [
         el("span", { text: svc }), el("span", { class: "mono", text: count }),
       ])));
     }
     if (rep.byDayOfWeek) {
-      detailWrap.appendChild(el("div", { class: "muted", style: "font-size:10.5px;font-weight:600;margin:8px 0 4px", text: "BY DAY OF WEEK" }));
+      detailWrap.appendChild(sectionLabel("BY DAY OF WEEK"));
       const maxCount = Math.max(1, ...rep.byDayOfWeek.map((d) => d.count));
       rep.byDayOfWeek.forEach((d) => {
         detailWrap.appendChild(el("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:2px" }, [
@@ -374,7 +449,7 @@ function renderRepCard(rep, showLocationBreakdown, goal) {
       });
     }
     if (rep.possibleDuplicates && rep.possibleDuplicates.length > 0) {
-      detailWrap.appendChild(el("div", { style: "color:var(--red);font-size:10.5px;font-weight:600;margin:8px 0 4px", text: "⚠ POSSIBLE DUPLICATES" }));
+      detailWrap.appendChild(sectionLabel("⚠ POSSIBLE DUPLICATES", "color:var(--red)"));
       rep.possibleDuplicates.forEach((dup) => {
         detailWrap.appendChild(el("div", { style: "font-size:11.5px;margin-bottom:6px;color:var(--red)" }, [
           el("div", { text: dup.customerName }),
@@ -382,9 +457,29 @@ function renderRepCard(rep, showLocationBreakdown, goal) {
         ]));
       });
     }
-    detailWrap.appendChild(el("div", { class: "muted", style: "font-size:10.5px;font-weight:600;margin:8px 0 4px", text: `ALL CLOSES (${rep.closes.length})` }));
+    const statusColorFor = (st) => (st === "arrived" ? "var(--green)" : st === "no_show" ? "var(--red)" : "var(--sub)");
+
+    // Every deal closed in the period, with when it was closed and when the car comes in.
+    detailWrap.appendChild(sectionLabel(`CLOSED IN THIS PERIOD (${rep.closing.closes.length})`));
+    if (rep.closing.closes.length === 0) detailWrap.appendChild(el("div", { class: "muted", style: "font-size:11.5px", text: "Nothing closed in this period." }));
+    rep.closing.closes.forEach((c) => {
+      const commText = c.status === "arrived" ? `+${money(c.commissionAmount)} earned` : `${money(c.commissionAmount)} if it shows`;
+      detailWrap.appendChild(el("div", { style: "margin-bottom:6px" }, [
+        el("div", { class: "row", style: "font-size:11.5px" }, [
+          el("div", {}, [el("span", { text: c.car }), showLocationBreakdown ? el("span", { class: "muted", text: ` · ${c.locationName}` }) : null]),
+          el("div", { style: "text-align:right" }, [
+            el("span", { class: "mono", text: money(c.basePrice) }),
+            el("span", { style: `color:${statusColorFor(c.status)};margin-left:6px;font-size:10px`, text: c.status }),
+          ]),
+        ]),
+        el("div", { class: "muted", style: "font-size:10.5px", text: `Closed ${formatDateTime(c.closedAt)} · ${c.duringHours ? "in-hours" : "after-hours"} · car scheduled ${formatDateTime(c.date)} · ${commText}` }),
+      ]));
+    });
+
+    // Every appointment landing in the period - the arrivals are what earn real commission.
+    detailWrap.appendChild(sectionLabel(`APPOINTMENTS IN THIS PERIOD (${rep.closes.length})`));
+    if (rep.closes.length === 0) detailWrap.appendChild(el("div", { class: "muted", style: "font-size:11.5px", text: "No appointments in this period." }));
     rep.closes.forEach((c) => {
-      const statusColor = c.status === "arrived" ? "var(--green)" : c.status === "no_show" ? "var(--red)" : "var(--sub)";
       detailWrap.appendChild(el("div", { class: "row", style: "font-size:11.5px;margin-bottom:3px" }, [
         el("div", {}, [
           el("span", { text: c.car }),
@@ -392,7 +487,8 @@ function renderRepCard(rep, showLocationBreakdown, goal) {
         ]),
         el("div", { style: "text-align:right" }, [
           el("span", { class: "mono", text: money(c.basePrice) }),
-          el("span", { style: `color:${statusColor};margin-left:6px;font-size:10px`, text: c.status }),
+          el("span", { style: `color:${statusColorFor(c.status)};margin-left:6px;font-size:10px`, text: c.status }),
+          c.status === "arrived" ? el("span", { class: "mono", style: "color:var(--green);margin-left:6px;font-size:10.5px", text: `+${money(c.commissionAmount)}` }) : null,
         ]),
       ]));
     });
@@ -404,20 +500,26 @@ function renderRepCard(rep, showLocationBreakdown, goal) {
     toggleBtn.textContent = showing ? "▸ See full breakdown" : "▾ Hide breakdown";
   } }, [el("span", { text: "▸ See full breakdown" })]);
 
+  const avgPerDeal = rep.closing.count ? rep.closing.value / rep.closing.count : 0;
+  const statBlock = (label, big, bigColor, caption, sub, subLabel, subColor, extraStyle) => el("div", { style: `flex:1;min-width:130px;${extraStyle || ""}` }, [
+    el("div", { class: "muted", style: "font-size:10.5px;letter-spacing:0.03em", text: label }),
+    el("div", { class: "mono", style: `font-size:22px;font-weight:600;color:${bigColor};margin-top:2px`, text: big }),
+    el("div", { class: "muted", style: "font-size:11px", text: caption }),
+    el("div", { class: "mono", style: `font-size:16px;font-weight:600;color:${subColor};margin-top:4px`, text: sub }),
+    el("div", { class: "muted", style: "font-size:10.5px", text: subLabel }),
+  ]);
+
   return el("div", { class: "card" }, [
-    el("div", { class: "row" }, [
-      el("div", {}, [
-        el("div", { style: "font-weight:500;font-size:16px", text: rep.name }),
-        el("div", { class: "muted", style: "font-size:12px", text: `${money(rep.closedValue)} closed value · avg ${money(rep.avgDealSize)}/car` }),
-        el("div", { class: "muted", style: "font-size:12px", text: `${rep.arrivedCount} arrived, ${rep.noShowCount} no-show, ${rep.pendingCount} pending · ${Math.round(rep.noShowRate)}% no-show rate` }),
-        rep.daysSinceLastClose !== null ? el("div", { style: `font-size:11.5px;margin-top:2px;color:${rep.daysSinceLastClose > 7 ? "var(--red)" : "var(--muted)"}`, text: `Last close: ${rep.daysSinceLastClose} day${rep.daysSinceLastClose !== 1 ? "s" : ""} ago` }) : null,
-      ]),
-      el("div", { style: "text-align:right" }, [
-        el("div", { class: "mono", style: "color:var(--green);font-weight:600;font-size:18px", text: money(rep.actualCommission) }),
-        el("div", { class: "muted", style: "font-size:10px", text: "actual commission" }),
-        rep.projectedCommission !== rep.actualCommission ? el("div", { class: "muted", style: "font-size:10px", text: `${money(rep.projectedCommission)} if all show` }) : null,
-      ]),
+    el("div", { style: "font-weight:500;font-size:16px;margin-bottom:8px", text: rep.name }),
+    el("div", { style: "display:flex;gap:16px;flex-wrap:wrap" }, [
+      statBlock("CLOSED", `${rep.closing.count}`, "var(--cyan)", rep.closing.count ? `deal${rep.closing.count !== 1 ? "s" : ""} · avg ${money(avgPerDeal)}` : "no deals closed", money(rep.closing.value), "closed value", "var(--amber)", "border-right:1px solid var(--border);padding-right:12px"),
+      statBlock("ARRIVED", `${rep.arrivedCount}`, "var(--amber)", `car${rep.arrivedCount !== 1 ? "s" : ""} that showed`, money(rep.actualCommission), "actual commission", "var(--green)"),
     ]),
+    el("div", { class: "muted", style: "font-size:12px;margin-top:8px", text: rep.closeCount > 0
+      ? `${rep.closeCount} appointment${rep.closeCount !== 1 ? "s" : ""} in this period · ${rep.arrivedCount} arrived, ${rep.noShowCount} no-show, ${rep.pendingCount} pending · ${Math.round(rep.noShowRate)}% no-show rate`
+      : "No appointments landing in this period" }),
+    rep.closeCount > 0 && rep.projectedCommission !== rep.actualCommission ? el("div", { class: "muted", style: "font-size:11px", text: `${money(rep.projectedCommission)} commission if everyone scheduled shows` }) : null,
+    rep.daysSinceLastClose !== null ? el("div", { style: `font-size:11.5px;margin-top:2px;color:${rep.daysSinceLastClose > 7 ? "var(--red)" : "var(--muted)"}`, text: `Last close: ${rep.daysSinceLastClose} day${rep.daysSinceLastClose !== 1 ? "s" : ""} ago` }) : null,
     renderGoalProgress(rep, goal),
     toggleBtn, detailWrap,
   ]);
@@ -427,9 +529,10 @@ async function renderCombined(content) {
   const picker = renderSimplePeriodPicker((params) => load(params));
   const locationTabs = el("div", { style: "display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap" });
   const body = el("div");
-  let activeLocationFilter = "combined"; // "combined" or a locationId
+  let activeLocationFilter = "combined"; // "combined" or a location name
 
   let goalsCache = [];
+  let closedCache = null;
   let currentPeriodType = "month";
   let latestRequestId = 0;
 
@@ -437,15 +540,29 @@ async function renderCombined(content) {
     const p = params || picker.getParams();
     const thisRequestId = ++latestRequestId;
     const qs = new URLSearchParams(p).toString();
-    const [newStats, newGoals] = await Promise.all([
-      api(`/api/combined/salesrep-stats?${qs}`),
-      api("/api/goals"),
-    ]);
+    let newStats, newClosed, newGoals;
+    try {
+      // Two views of the same period, fetched together: what's scheduled to land in it
+      // (matches Payroll) and what was actually closed in it (matches the leaderboard).
+      [newStats, newClosed, newGoals] = await Promise.all([
+        api(`/api/combined/salesrep-stats?${qs}`),
+        api(`/api/combined/salesrep-stats?${qs}&dateBasis=closed`),
+        api("/api/goals"),
+      ]);
+    } catch (e) {
+      if (thisRequestId !== latestRequestId) return;
+      body.innerHTML = "";
+      body.appendChild(el("div", { class: "card", style: "border-color:var(--red)" }, [
+        el("div", { style: "color:var(--red);font-size:12.5px", text: `Couldn't load: ${e.message || "something went wrong"}. Change the period or reload to try again.` }),
+      ]));
+      return;
+    }
     // If a newer request has started since this one began, a faster response already
     // rendered more current data - discard this now-stale result instead of overwriting it.
     if (thisRequestId !== latestRequestId) return;
     currentPeriodType = p.period;
     statsCache = newStats;
+    closedCache = newClosed;
     goalsCache = newGoals;
     renderLocationTabs();
     renderBody();
@@ -470,53 +587,78 @@ async function renderCombined(content) {
     });
   }
 
+  const sum = (list, f) => list.reduce((a, x) => a + f(x), 0);
+  const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+  // Appointment-side numbers worked out from a list of appointments - used for a single
+  // location, and for a rep who closed deals but has no appointment landing in the period.
+  function apptViewFrom(name, closes) {
+    const arrived = closes.filter((c) => c.status === "arrived");
+    const noShow = closes.filter((c) => c.status === "no_show");
+    const pending = closes.filter((c) => c.status !== "arrived" && c.status !== "no_show");
+    const closedValue = sum(closes, (c) => c.basePrice);
+    const byService = {};
+    closes.forEach((c) => { const k = c.baseService || "(not set)"; byService[k] = (byService[k] || 0) + 1; });
+    const byDayOfWeek = dayNames.map((d) => ({ day: d, count: 0 }));
+    closes.forEach((c) => { const d = new Date(c.closedAt); if (!isNaN(d.getTime())) byDayOfWeek[d.getUTCDay()].count += 1; });
+    return {
+      name, closeCount: closes.length, closedValue, avgDealSize: closes.length ? closedValue / closes.length : 0,
+      arrivedCount: arrived.length, noShowCount: noShow.length, pendingCount: pending.length,
+      noShowRate: (arrived.length + noShow.length) > 0 ? (noShow.length / (arrived.length + noShow.length)) * 100 : 0,
+      actualCommission: sum(arrived, (c) => c.commissionAmount || 0), projectedCommission: sum(closes, (c) => c.commissionAmount || 0),
+      byLocation: [], byService, byDayOfWeek, daysSinceLastClose: null, possibleDuplicates: [], closes,
+    };
+  }
+
+  // One entry per rep who has ANYTHING in the period at the chosen location - a deal closed
+  // (even for a car coming in next month) or a car arriving (even from an old deal).
+  function buildViews() {
+    const loc = activeLocationFilter === "combined" ? null : activeLocationFilter;
+    const inLoc = (c) => !loc || c.locationName === loc;
+    const names = [...new Set([...statsCache.perRep.map((r) => r.name), ...closedCache.perRep.map((r) => r.name)])];
+    const views = [];
+    names.forEach((name) => {
+      const a = statsCache.perRep.find((r) => r.name === name);
+      const c = closedCache.perRep.find((r) => r.name === name);
+      const apptCloses = (a ? a.closes : []).filter(inLoc);
+      const closedCloses = (c ? c.closes : []).filter(inLoc);
+      if (apptCloses.length === 0 && closedCloses.length === 0) return;
+      const view = !loc && a ? { ...a } : apptViewFrom(name, apptCloses);
+      view.closing = { count: closedCloses.length, value: sum(closedCloses, (x) => x.basePrice), projectedCommission: sum(closedCloses, (x) => x.commissionAmount || 0), closes: closedCloses };
+      if (view.daysSinceLastClose === null || view.daysSinceLastClose === undefined) {
+        const latest = closedCloses.map((x) => new Date(x.closedAt).getTime()).filter((t) => !isNaN(t)).sort((x, y) => y - x)[0];
+        view.daysSinceLastClose = latest ? Math.floor((Date.now() - latest) / 86400000) : null;
+      }
+      views.push(view);
+    });
+    // Same order as the leaderboard: most deals closed, then closed value, then commission.
+    return views.sort((x, y) => y.closing.count - x.closing.count || y.closing.value - x.closing.value || y.actualCommission - x.actualCommission || x.name.localeCompare(y.name));
+  }
+
   function renderBody() {
     body.innerHTML = "";
-    if (statsCache.errors.length > 0) {
+    const errs = [...statsCache.errors, ...closedCache.errors].filter((e, i, all) => all.findIndex((x) => x.locationName === e.locationName) === i);
+    if (errs.length > 0) {
       body.appendChild(el("div", { class: "card", style: "border-color:var(--red)" }, [
-        el("div", { style: "color:var(--red);font-size:12.5px", text: `Couldn't reach: ${statsCache.errors.map((e) => `${e.locationName} (${e.error})`).join(", ")}` }),
+        el("div", { style: "color:var(--red);font-size:12.5px", text: `Couldn't reach: ${errs.map((e) => `${e.locationName} (${e.error})`).join(", ")}` }),
         el("div", { class: "muted", style: "font-size:10.5px;margin-top:4px", text: "Numbers below don't include this location until it's reachable again." }),
       ]));
     }
-    if (statsCache.perRep.length === 0) { body.appendChild(el("div", { class: "muted", text: "No sales rep activity in this period." })); return; }
+    const views = buildViews();
+    if (views.length === 0) { body.appendChild(el("div", { class: "muted", text: "No sales rep activity in this period." })); return; }
 
-    if (activeLocationFilter === "combined") {
-      const totalValue = statsCache.perRep.reduce((a, r) => a + r.closedValue, 0);
-      const totalCommission = statsCache.perRep.reduce((a, r) => a + r.actualCommission, 0);
-      const totalCloses = statsCache.perRep.reduce((a, r) => a + r.closeCount, 0);
-      body.appendChild(el("div", { class: "metric-grid" }, [
-        el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total closes" }), el("div", { class: "metric-value", text: totalCloses })]),
-        el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Closed value" }), el("div", { class: "metric-value", style: "color:var(--amber)", text: money(totalValue) })]),
-        el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Total commission" }), el("div", { class: "metric-value", style: "color:var(--green)", text: money(totalCommission) })]),
-      ]));
-      statsCache.perRep.forEach((rep) => body.appendChild(renderRepCard(rep, true, goalFor(rep.name))));
-    } else {
-      // Filter each rep's closes down to just this one location, recompute their
-      // location-specific numbers from the same underlying data - no second fetch needed.
-      statsCache.perRep.forEach((rep) => {
-        const closes = rep.closes.filter((c) => c.locationName === activeLocationFilter);
-        if (closes.length === 0) return;
-        const arrived = closes.filter((c) => c.status === "arrived");
-        const noShow = closes.filter((c) => c.status === "no_show");
-        const pending = closes.filter((c) => c.status !== "arrived" && c.status !== "no_show");
-        const closedValue = closes.reduce((a, c) => a + c.basePrice, 0);
-        const byService = {};
-        closes.forEach((c) => { const k = c.baseService || "(not set)"; byService[k] = (byService[k] || 0) + 1; });
-        const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-        const byDayOfWeek = dayNames.map((name) => ({ day: name, count: 0 }));
-        closes.forEach((c) => { const d = new Date(c.closedAt); if (!isNaN(d.getTime())) byDayOfWeek[d.getUTCDay()].count += 1; });
-        const actualCommission = closes.filter((c) => c.status === "arrived").reduce((a, c) => a + (c.commissionAmount || 0), 0);
-        const projectedCommission = closes.reduce((a, c) => a + (c.commissionAmount || 0), 0);
-        const filtered = {
-          name: rep.name, closeCount: closes.length, closedValue, avgDealSize: closedValue / closes.length,
-          arrivedCount: arrived.length, noShowCount: noShow.length, pendingCount: pending.length,
-          noShowRate: (arrived.length + noShow.length) > 0 ? (noShow.length / (arrived.length + noShow.length)) * 100 : 0,
-          actualCommission, projectedCommission,
-          byLocation: [], byService, byDayOfWeek, daysSinceLastClose: null, possibleDuplicates: [], closes,
-        };
-        body.appendChild(renderRepCard(filtered, false, goalFor(rep.name)));
-      });
-    }
+    const totalDeals = sum(views, (v) => v.closing.count);
+    const totalClosedValue = sum(views, (v) => v.closing.value);
+    const totalArrived = sum(views, (v) => v.arrivedCount);
+    const totalCommission = sum(views, (v) => v.actualCommission);
+    body.appendChild(el("div", { class: "metric-grid" }, [
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Deals closed" }), el("div", { class: "metric-value", style: "color:var(--cyan)", text: totalDeals })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Closed value" }), el("div", { class: "metric-value", style: "color:var(--amber)", text: money(totalClosedValue) })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Cars arrived" }), el("div", { class: "metric-value", text: totalArrived })]),
+      el("div", { class: "metric" }, [el("div", { class: "metric-label", text: "Commission earned" }), el("div", { class: "metric-value", style: "color:var(--green)", text: money(totalCommission) })]),
+    ]));
+    body.appendChild(el("div", { class: "muted", style: "font-size:11px;margin:-8px 0 14px", text: "Closed = deals closed in this period, whatever day the car comes in. Arrived = cars that showed in this period and the commission they earned (matches each shop's Payroll)." }));
+    views.forEach((v) => body.appendChild(renderRepCard(v, activeLocationFilter === "combined", goalFor(v.name))));
   }
 
   content.appendChild(picker.el);
