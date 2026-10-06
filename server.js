@@ -263,6 +263,7 @@ app.get("/api/combined/salesrep-stats", requireOwner, async (req, res) => {
 app.get("/api/combined/cleanup-list", requireOwner, async (req, res) => {
   const db = loadDB();
   const all = [];
+  const possibleReschedules = [], leftOut = [], recentMerges = [];
   const errors = [];
   await Promise.all(db.locations.map(async (loc) => {
     try {
@@ -270,11 +271,14 @@ app.get("/api/combined/cleanup-list", requireOwner, async (req, res) => {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.json();
       (data.jobs || []).forEach((j) => all.push({ ...j, locationId: loc.id, locationName: loc.name }));
+      (data.possibleReschedules || []).forEach((j) => possibleReschedules.push({ ...j, locationId: loc.id, locationName: loc.name }));
+      (data.leftOut || []).forEach((j) => leftOut.push({ ...j, locationId: loc.id, locationName: loc.name }));
+      (data.recentMerges || []).forEach((j) => recentMerges.push({ ...j, locationId: loc.id, locationName: loc.name }));
     } catch (e) {
       errors.push({ locationName: loc.name, error: e.message || "Unreachable" });
     }
   }));
-  res.json({ jobs: all.sort((a, b) => (a.date < b.date ? 1 : -1)), errors });
+  res.json({ jobs: all.sort((a, b) => (a.date < b.date ? 1 : -1)), errors, possibleReschedules: possibleReschedules.sort((a, b) => (a.closedAt < b.closedAt ? 1 : -1)), leftOut: leftOut.sort((a, b) => (a.closedAt < b.closedAt ? 1 : -1)), recentMerges: recentMerges.sort((a, b) => (a.mergedAt < b.mergedAt ? 1 : -1)) });
 });
 
 app.post("/api/combined/cleanup-fix", requireOwner, async (req, res) => {
@@ -337,6 +341,7 @@ async function proxyWrite(req, res, path) {
 }
 app.post("/api/combined/job-edit", requireOwner, (req, res) => proxyWrite(req, res, "/api/cross-location/job-edit"));
 app.post("/api/combined/job-add", requireOwner, (req, res) => proxyWrite(req, res, "/api/cross-location/job-add"));
+app.post("/api/combined/job-merge", requireOwner, (req, res) => proxyWrite(req, res, "/api/cross-location/job-merge"));
 
 // Password recovery that leaves all your data alone. Only someone with access to the hosting
 // account can set environment variables, so this can't be triggered from the website:
