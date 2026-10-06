@@ -223,17 +223,111 @@ async function renderSettings(content) {
 
 async function renderCleanup(content) {
   const body = el("div");
+  // Suspected reschedules (a booking whose customer already has an earlier unfinished one for the same car) and the
+  // ones already left out. The button works at that booking's own location.
+  let pendingMsg = null;
+  async function flip(c, fields, okText, ask) {
+    if (ask && !confirm(ask)) return;
+    const key = Object.keys(fields)[0];
+    try {
+      const res = await api("/api/combined/job-edit", { method: "POST", body: JSON.stringify({ locationId: c.locationId, saleId: c.saleId, ...fields }) });
+      pendingMsg = (!res.applied || !res.applied.includes(key))
+        ? { ok: false, text: `${c.locationName} needs the latest tracker update before this can be used there.` }
+        : { ok: true, text: okText };
+    } catch (e) { pendingMsg = { ok: false, text: e.message || "Couldn't change that." }; }
+    load();
+  }
+  // Merge two bookings of the same customer into one job (the earlier one is kept). Can't be undone from here.
+  async function mergeCand(c) {
+    if (!confirm(`Merge these into ONE job?\n\nKept: the EARLIER job (${c.earlier.car}, ${formatDateTime(c.earlier.date)}), with its original closing time, rep and history, moved to the new appointment day.\nRemoved: the newer duplicate shown here.\n\nThis can't be undone from the app. Edit History at ${c.locationName} records it.`)) return;
+    try {
+      await api("/api/combined/job-merge", { method: "POST", body: JSON.stringify({ locationId: c.locationId, saleId: c.saleId, earlierId: c.earlier.id }) });
+      pendingMsg = { ok: true, text: "Merged into one job. It keeps its original closing time." };
+    } catch (e) { pendingMsg = { ok: false, text: e.message || "Couldn't merge these." }; }
+    load();
+  }
+  function renderRescheduleSections(data) {
+    const cands = data.possibleReschedules || [], left = data.leftOut || [], merged = data.recentMerges || [];
+    if (cands.length > 0) {
+      body.appendChild(el("div", { class: "card", style: "border-color:var(--amber)" }, [
+        el("div", { class: "muted", style: "margin-bottom:6px", text: `LOOKS LIKE A RESCHEDULE: counted as a new close (${cands.length})` }),
+        el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: "Each booking below belongs to a customer who already had an earlier, unfinished booking for the same car. That usually means a reschedule that got counted as a new sale. Choose what's true:" }),
+        el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:8px;line-height:1.5" }, [
+          el("div", { text: "• Reschedule: don't count: keeps both jobs, takes the new one off closing activity. The rep is still paid when the client shows up." }),
+          el("div", { text: "• Merge into one job: combines the two into the earlier job, which keeps its original closing time." }),
+          el("div", { text: "• Not a reschedule: it's a real new sale. Stop suggesting it." }),
+        ]),
+        ...cands.map((c) => el("div", { style: "padding:8px 0;border-top:0.5px solid var(--border)" }, [
+          el("div", { class: "row", style: "align-items:flex-start" }, [
+            el("div", {}, [
+              el("div", { style: "font-weight:500", text: c.car }),
+              el("div", { class: "muted", style: "font-size:11.5px", text: `${c.repName}${c.customerName ? " · " + c.customerName : ""} · ${c.locationName}` }),
+              el("div", { class: "muted", style: "font-size:11.5px", text: `NEW, counted as a close: closed ${formatDateTime(c.closedAt)} · car scheduled ${formatDateTime(c.date)}` }),
+              el("div", { style: "font-size:11.5px;color:var(--amber)", text: `EARLIER, same customer and car: ${c.earlier.car} · ${formatDateTime(c.earlier.date)} · ${c.earlier.status}` }),
+            ]),
+            el("div", { class: "mono", style: "color:var(--amber)", text: money(c.basePrice) }),
+          ]),
+          el("div", { style: "display:flex;gap:8px;margin-top:6px;flex-wrap:wrap" }, [
+            el("button", { class: "primary", style: "font-size:12px;padding:6px 12px", text: "↻ Reschedule: don't count", onclick: () => flip(c, { isReschedule: true }, "Left out of closing activity. It's still paid when the client shows up.", "Mark this as a reschedule?\n\nIt will be left out of the closing numbers (the Audit tab, the leaderboard, Combined and Statistics), because it's the same deal moved to a new day, not a new sale.\n\nBoth jobs stay. It stays fully in Payroll: the rep is still paid commission when the client shows up. You can undo this any time.") }),
+            c.canMerge === false ? null : el("button", { class: "ghost", style: "font-size:12px", text: "Merge into one job", onclick: () => mergeCand(c) }),
+            el("button", { class: "ghost", style: "font-size:12px", text: "Not a reschedule", onclick: () => flip(c, { rescheduleDismissed: true }, "Kept as a real new close. It won't be suggested again.", "Keep this as a real new close? It won't be suggested again.") }),
+          ]),
+          c.canMerge === false ? el("div", { class: "muted", style: "font-size:11px;margin-top:4px", text: "This one has already arrived or been paid, so it can't be merged. Use the first button." }) : null,
+        ])),
+      ]));
+    }
+    if (left.length > 0) {
+      const n = left.length;
+      const list = el("div", { style: "display:none;margin-top:6px" }, left.map((c) => el("div", { class: "row", style: "padding:6px 0;border-top:0.5px solid var(--border);align-items:flex-start" }, [
+        el("div", {}, [
+          el("div", { text: c.car }),
+          el("div", { class: "muted", style: "font-size:11px", text: `${c.repName}${c.customerName ? " · " + c.customerName : ""} · ${c.locationName} · closed ${formatDateTime(c.closedAt)}` }),
+        ]),
+        el("div", { style: "text-align:right" }, [
+          el("div", { class: "mono", style: "color:var(--amber)", text: money(c.basePrice) }),
+          el("button", { class: "ghost", style: "font-size:11px;padding:3px 9px;margin-top:4px", text: "Count as a close", onclick: () => flip(c, { isReschedule: false }, "Counted as a close again.") }),
+        ]),
+      ])));
+      const label = (open) => `${open ? "▾" : "▸"} ↻ ${n} rescheduled booking${n !== 1 ? "s" : ""} left out of closing activity (still paid when the client shows)`;
+      const toggle = el("button", { class: "ghost", style: "width:100%;text-align:left;font-size:12px;color:var(--amber)", text: label(false), onclick: () => {
+        const open = list.style.display !== "none";
+        list.style.display = open ? "none" : "block";
+        toggle.textContent = label(!open);
+      } });
+      body.appendChild(el("div", { class: "card" }, [toggle, list]));
+    }
+    if (merged.length > 0) {
+      const n = merged.length;
+      const list = el("div", { style: "display:none;margin-top:6px" }, [
+        el("div", { class: "muted", style: "font-size:11px;margin-bottom:4px", text: "A merge keeps the older job (with its original closing time) and removes the newer duplicate. This list is just a record." },),
+        ...merged.map((m) => el("div", { style: "padding:6px 0;border-top:0.5px solid var(--border)" }, [
+          el("div", { style: "font-size:12.5px", text: `${m.car || "(job)"}${m.customerName ? " · " + m.customerName : ""} · ${m.locationName}` }),
+          el("div", { class: "muted", style: "font-size:11px", text: `Moved from ${m.fromDate} to ${m.toDate} · merged ${formatDateTime(m.mergedAt)} by ${m.actor || "unknown"}` }),
+        ])),
+      ]);
+      const label = (open) => `${open ? "▾" : "▸"} ${n} job${n !== 1 ? "s" : ""} merged in the last 2 weeks`;
+      const toggle = el("button", { class: "ghost", style: "width:100%;text-align:left;font-size:12px", text: label(false), onclick: () => {
+        const open = list.style.display !== "none";
+        list.style.display = open ? "none" : "block";
+        toggle.textContent = label(!open);
+      } });
+      body.appendChild(el("div", { class: "card" }, [toggle, list]));
+    }
+  }
+
   let latestCleanupRequestId = 0;
   async function load() {
     const thisRequestId = ++latestCleanupRequestId;
     const data = await api("/api/combined/cleanup-list");
     if (thisRequestId !== latestCleanupRequestId) return;
     body.innerHTML = "";
+    if (pendingMsg) { body.appendChild(el("div", { class: "notice " + (pendingMsg.ok ? "ok" : "err"), text: pendingMsg.text })); pendingMsg = null; }
     if (data.errors.length > 0) {
       body.appendChild(el("div", { class: "card", style: "border-color:var(--red)" }, [
         el("div", { style: "color:var(--red);font-size:12.5px", text: `Couldn't reach: ${data.errors.map((e) => `${e.locationName} (${e.error})`).join(", ")}` }),
       ]));
     }
+    renderRescheduleSections(data);
     if (data.jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "Nothing needs cleanup across any location." })); return; }
     data.jobs.forEach((j) => {
       const priceInput = el("input", { type: "number", placeholder: "Base price", value: j.basePrice || "", style: `max-width:110px;${j.missingPrice ? "" : "display:none"}` });
@@ -998,6 +1092,9 @@ async function renderLeaderboard(app) {
   wrap.appendChild(errorBanner);
   wrap.appendChild(list);
   app.appendChild(wrap);
+  // Where "Deal closed!" announcements slide in, above everything else on the TV.
+  const bannerLayer = el("div", { style: "position:fixed;top:0;left:0;right:0;z-index:20;pointer-events:none;padding:0 24px" });
+  wrap.appendChild(bannerLayer);
 
   function tickClock() {
     clockEl.textContent = new Date().toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", second: "2-digit" });
@@ -1006,6 +1103,41 @@ async function renderLeaderboard(app) {
   const clockInterval = setInterval(tickClock, 1000);
 
   const medalFor = (rank) => rank === 0 ? "🥇" : rank === 1 ? "🥈" : rank === 2 ? "🥉" : null;
+
+  // ---- "Deal closed!" banner ----
+  // Announces a deal in front of the whole sales office the moment it shows up. Only a genuinely FRESH close counts:
+  // whatever is already on the board when the TV opens (or reloads) is just the starting point, and anything closed
+  // more than ~20 minutes ago - a bulk import, the owner correcting a closing time, a job added after the fact - is
+  // never announced. A close with no price yet waits until it has one, so the banner never says "$0".
+  const FRESH_MS = 20 * 60 * 1000;
+  const seenCloses = new Set();
+  const bannerQueue = [];
+  let baselineTaken = false, bannerBusy = false;
+  function showNextBanner() {
+    if (bannerBusy || bannerQueue.length === 0) return;
+    bannerBusy = true;
+    const c = bannerQueue.shift();
+    const more = bannerQueue.length;
+    const node = el("div", { class: "deal-banner" }, [
+      el("div", { style: "font-size:15px;letter-spacing:0.14em;opacity:0.9", text: "🔔 DEAL CLOSED" }),
+      el("div", { text: `${c.repName} just closed ${money(c.basePrice)}` }),
+      el("div", { style: "font-size:18px;font-weight:400;opacity:0.95", text: [c.baseService || c.car, c.locationName].filter(Boolean).join(" · ") + (more ? `   (+${more} more)` : "") }),
+    ]);
+    bannerLayer.appendChild(node);
+    setTimeout(() => { node.remove(); bannerBusy = false; showNextBanner(); }, window.DEAL_BANNER_MS || 9000);
+  }
+  function announceNewCloses(closingData) {
+    const all = closingData.perRep.flatMap((r) => r.closes.map((c) => ({ ...c, repName: r.name })));
+    const keyOf = (c) => `${c.locationId}:${c.id}`;
+    if (!baselineTaken) { all.forEach((c) => seenCloses.add(keyOf(c))); baselineTaken = true; return; }
+    all.filter((c) => !seenCloses.has(keyOf(c))).forEach((c) => {
+      if (!(Date.now() - Date.parse(c.closedAt) <= FRESH_MS)) { seenCloses.add(keyOf(c)); return; } // old or undated: quietly noted
+      if (!(c.basePrice > 0)) return; // fresh but no price yet: check again on the next refresh
+      seenCloses.add(keyOf(c));
+      bannerQueue.push(c);
+    });
+    showNextBanner();
+  }
 
   let latestLeaderboardRequestId = 0;
   async function load() {
@@ -1027,6 +1159,7 @@ async function renderLeaderboard(app) {
       return;
     }
     if (thisRequestId !== latestLeaderboardRequestId) return;
+    announceNewCloses(closingData);
     errorBanner.innerHTML = "";
     const allErrors = [...closingData.errors, ...arrivalData.errors];
     if (allErrors.length > 0) {
@@ -1081,7 +1214,7 @@ async function renderLeaderboard(app) {
   }
 
   await load();
-  window._leaderboardInterval = setInterval(load, 30000);
+  window._leaderboardInterval = setInterval(load, window.LEADERBOARD_POLL_MS || 15000);
 
   // Clean up the clock interval if the user navigates away - the main render() already
   // clears _leaderboardInterval, this just also stops the once-a-second clock tick.
