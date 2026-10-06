@@ -162,7 +162,7 @@ app.get("/api/combined/salesrep-stats", requireOwner, async (req, res) => {
   await Promise.all(db.locations.map(async (loc) => {
     try {
       const data = await fetchLocationCloses(loc, qs);
-      results.push({ locationId: loc.id, locationName: loc.name, perRep: data.perRep || [] });
+      results.push({ locationId: loc.id, locationName: loc.name, perRep: data.perRep || [], leftOut: data.leftOut || [] });
     } catch (e) {
       errors.push({ locationId: loc.id, locationName: loc.name, error: e.message || "Unreachable" });
     }
@@ -253,7 +253,10 @@ app.get("/api/combined/salesrep-stats", requireOwner, async (req, res) => {
     };
   }).sort((a, b) => b.closeCount - a.closeCount);
 
-  res.json({ perRep, errors, locationsQueried: results.map((r) => r.locationName) });
+  // Bookings the owner marked as reschedules are kept out of the closing numbers; they come through here so the
+  // Audit tab can list them and offer an undo.
+  const leftOut = results.flatMap((l) => (l.leftOut || []).map((x) => ({ ...x, locationId: l.locationId, locationName: l.locationName })));
+  res.json({ perRep, errors, locationsQueried: results.map((r) => r.locationName), leftOut });
 });
 
 // ---------- Combined Cleanup ----------
