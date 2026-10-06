@@ -489,6 +489,7 @@ function renderRepCard(rep, showLocationBreakdown, goal) {
         el("div", {}, [
           el("span", { text: c.car }),
           showLocationBreakdown ? el("span", { class: "muted", text: ` · ${c.locationName}` }) : null,
+          c.isReschedule ? el("span", { style: "color:var(--amber);font-size:10px;margin-left:6px", text: "↻ reschedule" }) : null,
         ]),
         el("div", { style: "text-align:right" }, [
           el("span", { class: "mono", text: money(c.basePrice) }),
@@ -744,8 +745,8 @@ async function renderAudit(content) {
       ["Commission if all show", money(sum(rows, (c) => c.commissionAmount || 0)), "var(--green)"],
       ["Earned so far", money(sum(rows.filter((c) => c.status === "arrived"), (c) => c.commissionAmount || 0)), "var(--green)"],
     ].map(([label, value, color]) => el("div", { class: "metric" }, [el("div", { class: "metric-label", text: label }), el("div", { class: "metric-value", style: `color:${color}`, text: value })]))));
-    body.appendChild(el("div", { class: "muted", style: "font-size:11px;margin:-8px 0 14px", text: "Every deal closed in this period, by when it was closed, whatever day the car comes in. Tap Edit on any line to fix it. Jobs with no sales rep are in Cleanup." }));
-    if (rows.length === 0) { body.appendChild(el("div", { class: "muted", text: "Nothing closed in this period." })); return; }
+    body.appendChild(el("div", { class: "muted", style: "font-size:11px;margin:-8px 0 14px", text: "Every deal closed in this period, by when it was closed, whatever day the car comes in. Tap Edit on any line to fix it, or ↻ if it's really a reschedule (it stays paid when the client shows). Jobs with no sales rep are in Cleanup." }));
+    if (rows.length === 0) { body.appendChild(el("div", { class: "muted", text: "Nothing closed in this period." })); const l = renderLeftOut(); if (l) body.appendChild(l); return; }
 
     const byRep = {};
     rows.forEach((c) => { (byRep[c.repName] = byRep[c.repName] || []).push(c); });
@@ -753,6 +754,45 @@ async function renderAudit(content) {
       .map(([name, list]) => ({ name, list: list.sort((a, b) => (a.closedAt < b.closedAt ? -1 : 1)), value: sum(list, (c) => c.basePrice) }))
       .sort((a, b) => b.value - a.value || b.list.length - a.list.length || a.name.localeCompare(b.name))
       .forEach((g) => body.appendChild(renderGroup(g)));
+    const leftEl = renderLeftOut();
+    if (leftEl) body.appendChild(leftEl);
+  }
+
+  // Marks (or un-marks) a booking as a reschedule at its own location. The shop says which fields it applied, so a
+  // location that hasn't been updated yet (it would silently ignore this) gets a clear message instead.
+  async function setReschedule(c, flag) {
+    if (!confirm(flag ? "Mark this as a reschedule?\n\nIt will be left out of the closing numbers (this tab, the leaderboard, Combined and Statistics), because it's the same deal moved to a new day, not a new sale.\n\nIt stays fully in Payroll: the rep is still paid commission when the client shows up. You can undo this any time." : "Count this as a close again?")) return;
+    try {
+      const res = await api("/api/combined/job-edit", { method: "POST", body: JSON.stringify({ locationId: c.locationId, saleId: c.id, isReschedule: flag }) });
+      if (!res.applied || !res.applied.includes("isReschedule")) { say(`${c.locationName} needs the latest tracker update before this can be used there.`, false); return; }
+      await load();
+      say(flag ? "Left out of closing activity. It's still paid when the client shows up." : "Counted as a close again.");
+    } catch (e) { say(e.message || "Couldn't change that.", false); }
+  }
+
+  // The bookings marked as reschedules in this period, so nothing is ever hidden without a way back.
+  function renderLeftOut() {
+    const left = (data.leftOut || []).filter((x) => activeLocation === "combined" || x.locationName === activeLocation);
+    if (left.length === 0) return null;
+    const n = left.length;
+    const label = (open) => `${open ? "▾" : "▸"} ↻ ${n} rescheduled booking${n !== 1 ? "s" : ""} left out of closing activity (still paid when the client shows)`;
+    const list = el("div", { style: "display:none;margin-top:8px" }, left.map((c) => el("div", { style: "padding:8px 0;border-top:0.5px solid var(--border)" }, [
+      el("div", { class: "row", style: "align-items:flex-start" }, [
+        el("div", {}, [
+          el("div", { style: "font-size:13px;font-weight:500", text: c.car }),
+          el("div", { class: "muted", style: "font-size:11px", text: [c.repName, c.customerName, c.locationName].filter(Boolean).join(" · ") }),
+          el("div", { class: "muted", style: "font-size:10.5px", text: `Closed ${formatDateTime(c.closedAt)} · car scheduled ${formatDateTime(c.date)}` }),
+        ]),
+        el("div", { class: "mono", style: "font-size:13px", text: money(c.basePrice) }),
+      ]),
+      el("button", { class: "ghost", style: "font-size:11px;padding:3px 9px;margin-top:6px", text: "Count as a close", onclick: () => setReschedule(c, false) }),
+    ])));
+    const toggle = el("button", { class: "ghost", style: "width:100%;text-align:left;font-size:12px;color:var(--amber)", text: label(false), onclick: () => {
+      const open = list.style.display !== "none";
+      list.style.display = open ? "none" : "block";
+      toggle.textContent = label(!open);
+    } });
+    return el("div", { class: "card" }, [toggle, list]);
   }
 
   function renderGroup(g) {
@@ -797,7 +837,10 @@ async function renderAudit(content) {
         ]),
       ]),
       el("div", { class: "muted", style: "font-size:11px;margin-top:3px", text: `Closed ${formatDateTime(c.closedAt)} · ${c.duringHours ? "in-hours" : "after-hours"} · car scheduled ${formatDateTime(c.date)} · ${commText}` }),
-      el("div", { style: "margin-top:6px" }, [editBtn]),
+      el("div", { style: "margin-top:6px;display:flex;gap:8px;flex-wrap:wrap" }, [
+        editBtn,
+        el("button", { class: "ghost", style: "font-size:11px;padding:3px 9px", text: "↻ Reschedule: don't count", onclick: () => setReschedule(c, true) }),
+      ]),
       slot,
     ]);
   }
