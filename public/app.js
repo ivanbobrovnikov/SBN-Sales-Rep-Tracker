@@ -343,7 +343,9 @@ async function renderCleanup(content) {
     renderRescheduleSections(data);
     if (data.jobs.length === 0) { body.appendChild(el("div", { class: "muted", text: "Nothing needs cleanup across any location." })); return; }
     data.jobs.forEach((j) => {
-      const priceInput = el("input", { type: "number", placeholder: "Base price", value: j.basePrice || "", style: `max-width:110px;${j.missingPrice ? "" : "display:none"}` });
+      // The shop fills a price in by itself whenever the title has one, so a row only reaches here for a price when the title has
+      // none, or the price was deliberately set to $0. In that second case the title's price is offered, ready to save.
+      const priceInput = el("input", { type: "number", placeholder: "Base price", value: j.basePrice || (j.missingPrice && j.titlePrice) || "", style: `max-width:110px;${j.missingPrice ? "" : "display:none"}` });
       const serviceSelect = el("select", { style: `max-width:140px;${j.missingService ? "" : "display:none"}` }, [
         el("option", { value: "", text: "Service..." }),
         el("option", { value: "Window Tint", text: "Window Tint" }),
@@ -380,11 +382,12 @@ async function renderCleanup(content) {
           el("span", { class: "pill", text: j.locationName }),
         ]),
         el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:8px", text: [j.missingPrice ? "Missing price" : null, j.missingService ? "Missing service" : null, j.missingRep ? "Missing rep/walk-in flag" : null].filter(Boolean).join(" · ") }),
+        j.missingPrice && j.titlePrice ? el("div", { style: "font-size:11.5px;color:var(--green);margin-bottom:6px", text: `The title says $${Number(j.titlePrice).toFixed(2)}. It's filled in below, so you can just save.` }) : null,
         el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center" }, [priceInput, serviceSelect, saveBtn, walkInBtn, onlineBtn, notice]),
       ]));
     });
   }
-  content.appendChild(el("div", { class: "muted", style: "margin-bottom:14px", text: "Every job across every location missing a price, service, or sales rep / walk-in flag. Fixing one here applies directly to that location's own tracker, just like fixing it there." }));
+  content.appendChild(el("div", { class: "muted", style: "margin-bottom:14px", text: "Every job across every location missing a price, service, or sales rep / walk-in flag. Fixing one here applies directly to that location's own tracker, just like fixing it there. Prices are filled in by themselves from the title (like $644-$50), even for jobs already done, so a job only shows up here for a price when its title has none." }));
   content.appendChild(body);
   await load();
 }
