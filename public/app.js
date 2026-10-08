@@ -1,3 +1,16 @@
+// The deal-closed banner's styling travels WITH the page code, so it can't be left unstyled if an older style.css is served.
+(function installBannerStyles() {
+  if (document.getElementById("banner-css")) return;
+  const style = document.createElement("style");
+  style.id = "banner-css";
+  style.textContent = `/* "Deal closed!" announcement on the leaderboard TV */
+@keyframes dealSlide { from { transform: translateY(-120%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+.deal-banner { margin: 16px auto 0; max-width: 920px; padding: 18px 28px; border-radius: 16px; text-align: center; color: #fff;
+  background: linear-gradient(90deg, #1b7a3c, #2fbf5f); font-size: 30px; font-weight: 600; letter-spacing: 0.01em;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5); animation: dealSlide 0.45s ease-out; }`;
+  document.head.appendChild(style);
+})();
+
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
