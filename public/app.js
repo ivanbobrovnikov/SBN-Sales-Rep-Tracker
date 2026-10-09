@@ -232,6 +232,35 @@ async function renderSettings(content) {
     goalNotice,
   ]));
   await loadGoals();
+
+  // ---- Password ----
+  content.appendChild(el("div", { class: "muted", style: "margin:24px 0 12px", text: "PASSWORD" }));
+  const pwWarn = el("div", { style: "display:none;font-size:12.5px;color:var(--amber);border:0.5px solid var(--amber);border-radius:8px;padding:8px 10px;margin-bottom:12px", text: "⚠ The RESET_OWNER_PASSWORD variable is still set in Railway. While it's there, it puts that password back every time this tool restarts, undoing what you set here. Delete it in Railway → Variables." });
+  const pwCurrent = el("input", { type: "password", placeholder: "Current password", autocomplete: "current-password" });
+  const pwNew = el("input", { type: "password", placeholder: "New password (at least 4 characters)", autocomplete: "new-password" });
+  const pwNew2 = el("input", { type: "password", placeholder: "New password again", autocomplete: "new-password" });
+  const pwOthers = el("input", { type: "checkbox", style: "width:auto;margin-right:8px" });
+  const pwNotice = el("div", { class: "notice" });
+  content.appendChild(el("div", { class: "card" }, [
+    pwWarn,
+    el("div", { class: "field" }, [el("label", { text: "Current password" }), pwCurrent]),
+    el("div", { class: "field" }, [el("label", { text: "New password" }), pwNew]),
+    el("div", { class: "field" }, [el("label", { text: "New password again" }), pwNew2]),
+    el("label", { style: "display:flex;align-items:center;font-size:13px;margin:4px 0 12px;cursor:pointer" }, [pwOthers, el("span", { text: "Also log out every other device (the leaderboard TV will need to log in again)" })]),
+    el("button", { class: "primary", onclick: async () => {
+      const bad = (t) => { pwNotice.textContent = t; pwNotice.style.color = "var(--red)"; };
+      if (!pwCurrent.value) return bad("Enter your current password.");
+      if (pwNew.value.length < 4) return bad("The new password must be at least 4 characters.");
+      if (pwNew.value !== pwNew2.value) return bad("The two new passwords don't match.");
+      try {
+        const r = await api("/api/change-password", { method: "POST", body: JSON.stringify({ currentPassword: pwCurrent.value, newPassword: pwNew.value, logOutOthers: pwOthers.checked }) });
+        pwCurrent.value = ""; pwNew.value = ""; pwNew2.value = ""; pwOthers.checked = false;
+        pwNotice.textContent = "Password changed ✓" + (r.loggedOutOthers ? " Every other device has been logged out." : " Devices that are already logged in stay logged in."); pwNotice.style.color = "var(--green)";
+      } catch (e) { bad(e.message); }
+    }, text: "Change password" }),
+    pwNotice,
+  ]));
+  api("/api/password-status").then((s) => { if (s.resetVariableSet) pwWarn.style.display = "block"; }).catch(() => {});
 }
 
 async function renderCleanup(content) {
@@ -294,7 +323,7 @@ async function renderCleanup(content) {
       const list = el("div", { style: "display:none;margin-top:6px" }, left.map((c) => el("div", { class: "row", style: "padding:6px 0;border-top:0.5px solid var(--border);align-items:flex-start" }, [
         el("div", {}, [
           el("div", { text: c.car }),
-          el("div", { class: "muted", style: "font-size:11px", text: `${c.repName}${c.customerName ? " · " + c.customerName : ""} · ${c.locationName} · closed ${formatDateTime(c.closedAt)}` }),
+          el("div", { class: "muted", style: "font-size:11px", text: `${c.repName}${c.customerName ? " · " + c.customerName : ""} · ${c.locationName} · closed ${formatDateTime(c.closedAt)}${c.auto ? " · flagged automatically (the title says rescheduled)" : ""}` }),
         ]),
         el("div", { style: "text-align:right" }, [
           el("div", { class: "mono", style: "color:var(--amber)", text: money(c.basePrice) }),
@@ -892,6 +921,7 @@ async function renderAudit(content) {
           el("div", { style: "font-size:13px;font-weight:500", text: c.car }),
           el("div", { class: "muted", style: "font-size:11px", text: [c.repName, c.customerName, c.locationName].filter(Boolean).join(" · ") }),
           el("div", { class: "muted", style: "font-size:10.5px", text: `Closed ${formatDateTime(c.closedAt)} · car scheduled ${formatDateTime(c.date)}` }),
+          c.auto ? el("div", { style: "font-size:10.5px;color:var(--amber)", text: "Flagged automatically: the title says rescheduled" }) : null,
         ]),
         el("div", { class: "mono", style: "font-size:13px", text: money(c.basePrice) }),
       ]),
@@ -1090,6 +1120,195 @@ async function renderAudit(content) {
   await Promise.all([loadReps(), load()]);
 }
 
+// ---- DEAL SOUNDS: DATA START ----
+// The funny sound that plays when a "Deal closed!" banner pops up. Made in the browser from simple tones and noise, so there are no audio files to
+// host, load, or worry about owning. Each voice is one sound layered on the others: type (a wave shape, or "noise"), when it starts (at), how long it lasts
+// (dur), how loud (gain), its pitch (freq, sliding to freqEnd), an optional wobble (vibrato), an optional band-pass "nasal" filter, and decay (rings out like a bell).
+// Each sound also has a level that evens out how loud it is next to the others (worked out from the rendered audio), so "Random" never blasts one and whispers the next.
+const DEAL_SOUNDS = {
+  chaching: { name: "Cha-ching 💰", level: 1.86, voices: [
+    { type: "noise", at: 0, dur: 0.07, gain: 0.5, bandpass: 2800 },
+    { type: "triangle", at: 0.08, dur: 1.0, gain: 0.4, freq: 2093, decay: true },
+    { type: "triangle", at: 0.16, dur: 1.2, gain: 0.32, freq: 2637, decay: true },
+    { type: "sine", at: 0.08, dur: 0.9, gain: 0.15, freq: 4186, decay: true },
+  ] },
+  airhorn: { name: "Air horn 📯", level: 0.69, voices: [
+    ...[0, 0.32].flatMap((at) => [
+      { type: "sawtooth", at, dur: 0.26, gain: 0.26, freq: 466, freqEnd: 440 },
+      { type: "sawtooth", at, dur: 0.26, gain: 0.26, freq: 474, freqEnd: 446 },
+      { type: "square", at, dur: 0.26, gain: 0.1, freq: 932 },
+    ]),
+    { type: "sawtooth", at: 0.64, dur: 0.8, gain: 0.26, freq: 466, freqEnd: 420 },
+    { type: "sawtooth", at: 0.64, dur: 0.8, gain: 0.26, freq: 474, freqEnd: 426 },
+    { type: "square", at: 0.64, dur: 0.8, gain: 0.1, freq: 932, freqEnd: 840 },
+  ] },
+  kazoo: { name: "Kazoo fanfare 🎺", level: 1.79, voices: [[523, 0, 0.13], [659, 0.15, 0.13], [784, 0.3, 0.13], [1047, 0.45, 0.55]].map(([freq, at, dur]) => (
+    { type: "sawtooth", at, dur, gain: 0.22, freq, vibrato: { rate: 24, depth: 9 }, bandpass: 1400 })) },
+  boing: { name: "Boing 🪀", level: 0.45, voices: [
+    { type: "sine", at: 0, dur: 0.28, gain: 0.5, freq: 160, freqEnd: 820, vibrato: { rate: 16, depth: 45 } },
+    { type: "sine", at: 0.26, dur: 0.5, gain: 0.45, freq: 820, freqEnd: 240, vibrato: { rate: 14, depth: 55 } },
+  ] },
+  party: { name: "Party horn 🎉", level: 1.22, voices: [
+    { type: "square", at: 0, dur: 0.18, gain: 0.18, freq: 740, freqEnd: 1180, bandpass: 1800 },
+    ...[523, 659, 784, 1047].map((freq) => ({ type: "triangle", at: 0.24, dur: 0.75, gain: 0.12, freq, release: 0.25 })),   // a held "ta-da" chord
+  ] },
+  duck: { name: "Duck quack 🦆", level: 1.48, voices: [0, 0.3].map((at) => (
+    { type: "sawtooth", at, dur: 0.17, gain: 0.4, freq: 760, freqEnd: 300, bandpass: 1200, vibrato: { rate: 38, depth: 25 } })) },
+};
+const DEAL_VOLUMES = { low: 0.25, medium: 0.55, high: 0.95 };
+// ---- DEAL SOUNDS: DATA END ----
+
+// ---- DEAL SOUNDS: CUSTOM LEVEL START ----
+// Sounds the owner uploads come in at every loudness there is, so each one gets a level that brings it to the same average loudness as the built-in
+// sounds (without its loudest moment ever passing 92% of full scale at HIGH volume). Silence at the start and end is ignored when measuring.
+const MAX_CUSTOM_SECONDS = 12;
+const CUSTOM_TARGET_RMS = 0.0708;
+function customSoundLevel(channels) {
+  const n = channels[0].length;
+  let peak = 0, first = -1, last = -1;
+  for (let i = 0; i < n; i++) {
+    let m = 0;
+    for (let c = 0; c < channels.length; c++) { const v = Math.abs(channels[c][i]); if (v > m) m = v; }
+    if (m > peak) peak = m;
+    if (m > 0.002) { if (first < 0) first = i; last = i; }
+  }
+  if (first < 0) return { silent: true, level: 1, peak, rms: 0 };
+  let sum = 0, count = 0;
+  for (let i = first; i <= last; i++) for (let c = 0; c < channels.length; c++) { sum += channels[c][i] * channels[c][i]; count += 1; }
+  const rms = Math.sqrt(sum / count);
+  const level = Math.max(0.05, Math.min(CUSTOM_TARGET_RMS / (rms * DEAL_VOLUMES.medium), 0.92 / (DEAL_VOLUMES.high * peak), 8));   // loudness is matched AT MEDIUM volume, like the built-in sounds
+  return { silent: false, level, peak, rms };
+}
+// ---- DEAL SOUNDS: CUSTOM LEVEL END ----
+
+// Browsers refuse to play sound until the person has tapped or clicked the page once, so the sound system is only woken up by a tap.
+let dealAudio = null;
+const dealCustom = { list: [], buffers: new Map(), pending: new Map(), current: null };   // the owner's own sounds: the list, the ones ready to play, the ones being fetched, the one playing now
+function dealAudioContext() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  if (!dealAudio) { try { dealAudio = new AC(); } catch (e) { return null; } }
+  return dealAudio;
+}
+function loadDealSoundPrefs() {
+  let choice = "random", volume = "medium";
+  try {
+    const c = localStorage.getItem("dealSoundChoice"), v = localStorage.getItem("dealSoundVolume");
+    if (c && (c === "off" || c === "random" || c === "custom-random" || DEAL_SOUNDS[c] || /^custom:[a-f0-9]{16}$/.test(c))) choice = c;
+    if (v && DEAL_VOLUMES[v] != null) volume = v;
+  } catch (e) { /* storage blocked: the defaults are fine */ }
+  return { choice, volume };
+}
+function saveDealSoundPrefs(p) { try { localStorage.setItem("dealSoundChoice", p.choice); localStorage.setItem("dealSoundVolume", p.volume); } catch (e) { /* nothing to do */ } }
+const readDealFile = (file) => file.arrayBuffer ? file.arrayBuffer() : new Promise((resolve, reject) => { const fr = new FileReader(); fr.onload = () => resolve(fr.result); fr.onerror = reject; fr.readAsArrayBuffer(file); });
+function decodeDealAudio(ctx, arrayBuffer) {     // works with both the promise and the older callback form of decodeAudioData
+  return new Promise((resolve, reject) => { try { const p = ctx.decodeAudioData(arrayBuffer, resolve, reject); if (p && typeof p.then === "function") p.then(resolve, reject); } catch (e) { reject(e); } });
+}
+function analyseCustomBuffer(buf) {
+  const limit = Math.min(buf.length, Math.floor(MAX_CUSTOM_SECONDS * buf.sampleRate)), channels = [];
+  for (let c = 0; c < buf.numberOfChannels; c++) { const ch = buf.getChannelData(c); channels.push(ch.subarray ? ch.subarray(0, limit) : ch.slice(0, limit)); }
+  return customSoundLevel(channels);
+}
+// Fetches one of the owner's sounds and gets it ready to play (needs the sound system awake, i.e. after the first tap).
+function loadCustomBuffer(id) {
+  if (dealCustom.buffers.has(id)) return Promise.resolve(dealCustom.buffers.get(id));
+  if (dealCustom.pending.has(id)) return dealCustom.pending.get(id);
+  const ctx = dealAudio;
+  if (!ctx) return Promise.resolve(null);
+  const p = (async () => {
+    try {
+      const r = await fetch(`/api/sounds/${id}/file`, { credentials: "same-origin" });
+      if (!r.ok) return null;
+      const buf = await decodeDealAudio(ctx, await r.arrayBuffer());
+      const info = analyseCustomBuffer(buf);
+      if (info.silent) return null;
+      const entry = { buffer: buf, level: info.level, seconds: buf.duration };
+      dealCustom.buffers.set(id, entry);
+      return entry;
+    } catch (e) { return null; } finally { dealCustom.pending.delete(id); }
+  })();
+  dealCustom.pending.set(id, p);
+  return p;
+}
+function stopCustomPlayback() {
+  const c = dealCustom.current;
+  if (!c) return;
+  dealCustom.current = null;
+  try { c.src.stop(); } catch (e) { /* it had already finished */ }
+}
+function playCustomSound(id, volumeKey) {
+  const ctx = dealAudio, entry = dealCustom.buffers.get(id);
+  if (!ctx || ctx.state !== "running" || !entry) return false;
+  stopCustomPlayback();                           // a new banner cuts off a clip that is still playing
+  const t0 = ctx.currentTime + 0.02, dur = Math.min(entry.seconds, MAX_CUSTOM_SECONDS);
+  const vol = (DEAL_VOLUMES[volumeKey] != null ? DEAL_VOLUMES[volumeKey] : DEAL_VOLUMES.medium) * entry.level;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(vol, t0);
+  if (entry.seconds > MAX_CUSTOM_SECONDS) { g.gain.setValueAtTime(vol, t0 + dur - 0.4); g.gain.linearRampToValueAtTime(0.0001, t0 + dur); }   // never longer than the limit: fade out at the end
+  g.connect(ctx.destination);
+  const src = ctx.createBufferSource();
+  src.buffer = entry.buffer; src.connect(g);
+  src.start(t0); src.stop(t0 + dur + 0.05);
+  dealCustom.current = { src, g };
+  src.onended = () => { try { g.disconnect(); } catch (e) { /* already gone */ } if (dealCustom.current && dealCustom.current.src === src) dealCustom.current = null; };
+  return true;
+}
+// Plays one sound if the browser has allowed sound; returns which one played, or false.
+function playDealSound(choice, volumeKey) {
+  const ctx = dealAudioContext();
+  if (!ctx || ctx.state !== "running") return false;
+  stopCustomPlayback();
+  const builtIn = Object.keys(DEAL_SOUNDS);
+  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+  const customReady = dealCustom.list.filter((s) => dealCustom.buffers.has(s.id)).map((s) => "custom:" + s.id);
+  let key = choice;
+  if (choice === "random") key = pick(builtIn.concat(customReady));            // Random includes the owner's own sounds
+  else if (choice === "custom-random") key = customReady.length ? pick(customReady) : pick(builtIn);
+  if (typeof key === "string" && key.indexOf("custom:") === 0) {
+    if (playCustomSound(key.slice(7), volumeKey)) return key;
+    loadCustomBuffer(key.slice(7));               // not ready yet (or it was deleted): get it for next time, and play a built-in this once so the banner is never silent
+    key = pick(builtIn);
+  }
+  const def = DEAL_SOUNDS[key];
+  if (!def) return false;
+  const master = ctx.createGain();
+  master.gain.value = (DEAL_VOLUMES[volumeKey] != null ? DEAL_VOLUMES[volumeKey] : DEAL_VOLUMES.medium) * (def.level || 1);
+  master.connect(ctx.destination);
+  const t0 = ctx.currentTime + 0.02;
+  let last = 0;
+  def.voices.forEach((v) => {
+    const start = t0 + v.at, end = start + v.dur, attack = v.attack || 0.01, release = v.release || 0.08;
+    last = Math.max(last, v.at + v.dur);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, start);
+    g.gain.linearRampToValueAtTime(v.gain, start + attack);
+    if (v.decay) g.gain.exponentialRampToValueAtTime(0.0001, end);                        // bells ring out
+    else { g.gain.setValueAtTime(v.gain, Math.max(start + attack, end - release)); g.gain.linearRampToValueAtTime(0.0001, end); }
+    let src;
+    if (v.type === "noise") {
+      const len = Math.max(1, Math.ceil(ctx.sampleRate * v.dur));
+      const buf = ctx.createBuffer(1, len, ctx.sampleRate), data = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+      src = ctx.createBufferSource(); src.buffer = buf;
+    } else {
+      src = ctx.createOscillator(); src.type = v.type;
+      src.frequency.setValueAtTime(v.freq, start);
+      if (v.freqEnd) src.frequency.exponentialRampToValueAtTime(v.freqEnd, end);
+      if (v.vibrato) {
+        const lfo = ctx.createOscillator(), lfoGain = ctx.createGain();
+        lfo.frequency.value = v.vibrato.rate; lfoGain.gain.value = v.vibrato.depth;
+        lfo.connect(lfoGain); lfoGain.connect(src.frequency);
+        lfo.start(start); lfo.stop(end + 0.05);
+      }
+    }
+    if (v.bandpass) { const f = ctx.createBiquadFilter(); f.type = "bandpass"; f.frequency.value = v.bandpass; src.connect(f); f.connect(g); } else src.connect(g);
+    g.connect(master);
+    src.start(start); src.stop(end + 0.05);
+  });
+  setTimeout(() => { try { master.disconnect(); } catch (e) { /* already gone */ } }, (last + 0.4) * 1000);
+  return key;
+}
+
 async function renderLeaderboard(app) {
   const wrap = el("div", { style: "background:var(--bg);min-height:100vh;padding:32px 40px" });
   const exitBtn = el("button", { class: "ghost", style: "position:fixed;top:16px;right:16px;z-index:10", onclick: () => { currentTab = "combined"; render(); }, text: "✕ Exit" });
@@ -1111,6 +1330,156 @@ async function renderLeaderboard(app) {
   // Where "Deal closed!" announcements slide in, above everything else on the TV.
   const bannerLayer = el("div", { style: "position:fixed;top:0;left:0;right:0;z-index:20;pointer-events:none;padding:0 24px" });
   wrap.appendChild(bannerLayer);
+
+  // ---- the deal sound: its on-screen control, bottom-right ----
+  const soundPrefs = loadDealSoundPrefs();
+  const soundSupported = !!(window.AudioContext || window.webkitAudioContext);
+  const clearKids = (node) => { while (node.firstChild) node.removeChild(node.firstChild); };
+  const soundHint = el("div", { style: "display:none;font-size:12.5px;color:var(--amber);background:var(--panel);border:0.5px solid var(--amber);border-radius:8px;padding:6px 10px;max-width:300px;text-align:right", text: "🔇 Tap anywhere once to turn the deal sound on (browsers need one tap)" });
+  const soundPanel = el("div", { style: "display:none;background:var(--panel);border:0.5px solid var(--border);border-radius:10px;padding:12px;width:290px;max-height:70vh;overflow-y:auto" });
+  const soundBtn = el("button", { class: "ghost", style: "font-size:13px" });
+  const choiceSel = el("select", { style: "width:100%;margin-bottom:8px" });
+  const volumeSel = el("select", { style: "width:100%;margin-bottom:8px" }, [el("option", { value: "low", text: "Volume: low" }), el("option", { value: "medium", text: "Volume: medium" }), el("option", { value: "high", text: "Volume: high" })]);
+  const testBtn = el("button", { class: "ghost", style: "width:100%", text: "▶ Test the sound" });
+  const customList = el("div", { style: "margin-top:6px" });
+  const customStatus = el("div", { style: "font-size:11.5px;margin-top:6px;min-height:14px;color:var(--sub)" });
+  const fileInput = el("input", { type: "file", accept: "audio/*,.mp3,.wav,.ogg,.m4a,.aac,.webm,.flac", style: "display:none" });
+  const addBtn = el("button", { class: "ghost", style: "width:100%", text: "➕ Add my own sound…" });
+  volumeSel.value = soundPrefs.volume;
+  const audioRunning = () => !!(dealAudio && dealAudio.state === "running");
+  const customNameOf = (choice) => { const s = dealCustom.list.find((x) => "custom:" + x.id === choice); return s ? s.name : null; };
+  function choiceLabel() {
+    const c = soundPrefs.choice;
+    if (c === "random") return "Random 🎲";
+    if (c === "custom-random") return "Random: my sounds 🎲";
+    if (c.indexOf("custom:") === 0) return "🎵 " + (customNameOf(c) || "my sound");
+    return DEAL_SOUNDS[c].name;
+  }
+  function rebuildChoiceOptions() {
+    clearKids(choiceSel);
+    const opt = (v, t) => el("option", { value: v, text: t });
+    choiceSel.appendChild(opt("random", "Random 🎲 (all sounds)"));
+    Object.entries(DEAL_SOUNDS).forEach(([k, d]) => choiceSel.appendChild(opt(k, d.name)));
+    if (dealCustom.list.length) {
+      const g = document.createElement("optgroup"); g.label = "My sounds";
+      g.appendChild(opt("custom-random", "Random: just my sounds 🎲"));
+      dealCustom.list.forEach((s) => g.appendChild(opt("custom:" + s.id, "🎵 " + s.name)));
+      choiceSel.appendChild(g);
+    }
+    choiceSel.appendChild(opt("off", "Off (silent)"));
+    choiceSel.value = soundPrefs.choice;
+  }
+  function refreshSoundUi() {
+    const on = soundPrefs.choice !== "off";
+    soundBtn.textContent = !on ? "🔇 Deal sound: off" : `🔊 Deal sound: ${choiceLabel()}`;
+    soundHint.style.display = on && !audioRunning() ? "block" : "none";
+  }
+  function say(text, color) { customStatus.textContent = text; customStatus.style.color = color || "var(--sub)"; }
+  // Gets the sounds that might be needed ready ahead of time, so the first banner after a tap isn't waiting on a download.
+  function prefetchCustom() {
+    if (!dealAudio) return;
+    const c = soundPrefs.choice;
+    const ids = c.indexOf("custom:") === 0 ? [c.slice(7)] : (c === "random" || c === "custom-random") ? dealCustom.list.map((s) => s.id) : [];
+    ids.forEach((id) => loadCustomBuffer(id));
+  }
+  // Wakes the sound up (needs a tap), then runs `then` once it is awake.
+  function wakeSound(then) {
+    const ctx = dealAudioContext();
+    if (!ctx) return;
+    const done = () => { refreshSoundUi(); if (audioRunning()) { prefetchCustom(); if (then) then(); } };
+    if (ctx.state === "running") { done(); return; }
+    Promise.resolve(ctx.resume()).then(done, done);
+  }
+  async function preview() {
+    if (soundPrefs.choice === "off") return;       // "Off" means silent, including Test
+    if (soundPrefs.choice.indexOf("custom:") === 0) await loadCustomBuffer(soundPrefs.choice.slice(7));
+    else if (soundPrefs.choice === "custom-random") await Promise.all(dealCustom.list.map((s) => loadCustomBuffer(s.id)));
+    playDealSound(soundPrefs.choice, soundPrefs.volume);
+  }
+  function renderCustomList() {
+    clearKids(customList);
+    if (!dealCustom.list.length) { customList.appendChild(el("div", { class: "muted", style: "font-size:12px", text: "No sounds of your own yet." })); return; }
+    dealCustom.list.forEach((s) => customList.appendChild(el("div", { class: "row", style: "gap:6px;margin-bottom:4px;align-items:center" }, [
+      el("span", { style: "flex:1;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap", text: "🎵 " + s.name }),
+      el("button", { class: "ghost", style: "padding:2px 8px;font-size:12px", title: "Play it", text: "▶", onclick: () => wakeSound(async () => { await loadCustomBuffer(s.id); playCustomSound(s.id, soundPrefs.volume); }) }),
+      el("button", { class: "ghost", style: "padding:2px 8px;font-size:12px", title: "Delete it", text: "🗑", onclick: async () => {
+        if (!confirm(`Delete “${s.name}”?`)) return;
+        try { await api(`/api/sounds/${s.id}`, { method: "DELETE" }); say(`Deleted “${s.name}”.`); await refreshCustomSounds(); } catch (e) { say(e.message || "Couldn't delete that.", "var(--red)"); }
+      } }),
+    ])));
+  }
+  function applyCustomList(list) {
+    const sig = (l) => JSON.stringify(l.map((s) => [s.id, s.name]));
+    const changed = sig(list) !== sig(dealCustom.list);
+    dealCustom.list = list;
+    Array.from(dealCustom.buffers.keys()).forEach((id) => { if (!list.some((s) => s.id === id)) dealCustom.buffers.delete(id); });
+    const c = soundPrefs.choice;
+    if ((c.indexOf("custom:") === 0 && !list.some((s) => "custom:" + s.id === c)) || (c === "custom-random" && !list.length)) { soundPrefs.choice = "random"; saveDealSoundPrefs(soundPrefs); }   // the sound it was set to is gone
+    if (changed) { rebuildChoiceOptions(); renderCustomList(); }
+    refreshSoundUi();
+    prefetchCustom();
+  }
+  async function refreshCustomSounds() {
+    try { applyCustomList(await api("/api/sounds")); } catch (e) { /* offline for a moment: keep what we have */ }
+  }
+  async function addCustomSound(file) {
+    const bad = "var(--red)";
+    if (!file) return;
+    if (file.size === 0) return say("That file is empty.", bad);
+    if (file.size > 3 * 1024 * 1024) return say(`That file is ${(file.size / 1048576).toFixed(1)} MB. Please keep it under 3 MB.`, bad);
+    const ctx = dealAudioContext();
+    if (!ctx) return say("This browser can't play custom sounds.", bad);
+    say("Checking the sound…");
+    let buf;
+    try { buf = await decodeDealAudio(ctx, await readDealFile(file)); } catch (e) { return say("That file couldn't be read as sound. Try an MP3 or WAV.", bad); }
+    if (buf.duration > MAX_CUSTOM_SECONDS + 0.05) return say(`That clip is ${buf.duration.toFixed(1)} seconds long. Please use one under ${MAX_CUSTOM_SECONDS} seconds, so it finishes before the banner goes away.`, bad);
+    const info = analyseCustomBuffer(buf);
+    if (info.silent) return say("That clip is silent.", bad);
+    say("Saving…");
+    const name = file.name.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ").trim().slice(0, 40) || "My sound";
+    let saved;
+    try {
+      const r = await fetch(`/api/sounds?name=${encodeURIComponent(name)}`, { method: "POST", headers: { "Content-Type": file.type || "application/octet-stream" }, body: file });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) return say(d.error || "Couldn't save that sound.", bad);
+      saved = d;
+    } catch (e) { return say("Couldn't save that sound. Check the connection and try again.", bad); }
+    dealCustom.buffers.set(saved.id, { buffer: buf, level: info.level, seconds: buf.duration });   // already decoded: no need to fetch it again
+    dealCustom.list = dealCustom.list.concat([saved]);
+    soundPrefs.choice = "custom:" + saved.id; saveDealSoundPrefs(soundPrefs);
+    rebuildChoiceOptions(); renderCustomList(); refreshSoundUi();
+    say(`Added “${saved.name}” ✓ and switched to it.`, "var(--green)");
+    wakeSound(() => playCustomSound(saved.id, soundPrefs.volume));
+  }
+  rebuildChoiceOptions(); renderCustomList();
+  choiceSel.addEventListener("change", () => { soundPrefs.choice = choiceSel.value; saveDealSoundPrefs(soundPrefs); refreshSoundUi(); if (soundPrefs.choice !== "off") wakeSound(preview); });
+  volumeSel.addEventListener("change", () => { soundPrefs.volume = volumeSel.value; saveDealSoundPrefs(soundPrefs); wakeSound(preview); });
+  testBtn.addEventListener("click", () => wakeSound(preview));
+  addBtn.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", () => { const f = fileInput.files && fileInput.files[0]; fileInput.value = ""; addCustomSound(f); });
+  soundBtn.addEventListener("click", () => { soundPanel.style.display = soundPanel.style.display === "none" ? "block" : "none"; });
+  soundPanel.appendChild(choiceSel); soundPanel.appendChild(volumeSel); soundPanel.appendChild(testBtn);
+  soundPanel.appendChild(el("div", { style: "margin-top:12px;border-top:0.5px solid var(--border);padding-top:10px" }, [
+    el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.04em;margin-bottom:4px", text: "MY OWN SOUNDS" }),
+    customList, addBtn, fileInput, customStatus,
+    el("div", { class: "muted", style: `font-size:11px;margin-top:4px`, text: `MP3, WAV, OGG or M4A · up to ${MAX_CUSTOM_SECONDS} seconds · 3 MB. Saved on the server, so every screen can use them.` }),
+  ]));
+  soundPanel.appendChild(el("div", { class: "muted", style: "font-size:11px;margin-top:10px", text: "Plays each time a Deal closed banner pops up. Which sound is chosen is saved on this screen." }));
+  const unlockEvents = ["pointerdown", "keydown", "touchstart", "click"];
+  function unlockSound() {
+    if (!wrap.isConnected) { unlockEvents.forEach((e) => document.removeEventListener(e, unlockSound, true)); return; }
+    if (soundPrefs.choice !== "off") wakeSound();
+  }
+  if (soundSupported) {
+    unlockEvents.forEach((e) => document.addEventListener(e, unlockSound, true));
+    wrap.appendChild(el("div", { style: "position:fixed;right:16px;bottom:16px;z-index:25;display:flex;flex-direction:column;align-items:flex-end;gap:8px" }, [soundPanel, soundHint, soundBtn]));
+    refreshSoundUi();
+    refreshCustomSounds();
+  }
+  function playBannerSound() {
+    if (!soundSupported || soundPrefs.choice === "off") return;
+    if (!playDealSound(soundPrefs.choice, soundPrefs.volume)) refreshSoundUi();   // not allowed to play yet: the "tap once" note stays up
+  }
 
   function tickClock() {
     clockEl.textContent = new Date().toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", second: "2-digit" });
@@ -1140,6 +1509,7 @@ async function renderLeaderboard(app) {
       el("div", { style: "font-size:18px;font-weight:400;opacity:0.95", text: [c.baseService || c.car, c.locationName].filter(Boolean).join(" · ") + (more ? `   (+${more} more)` : "") }),
     ]);
     bannerLayer.appendChild(node);
+    playBannerSound();                 // the funny sound, once for each banner that pops up
     setTimeout(() => { node.remove(); bannerBusy = false; showNextBanner(); }, window.DEAL_BANNER_MS || 9000);
   }
   function announceNewCloses(closingData) {
@@ -1157,6 +1527,7 @@ async function renderLeaderboard(app) {
 
   let latestLeaderboardRequestId = 0;
   async function load() {
+    if (soundSupported) refreshCustomSounds();     // sounds added from another device show up here within a refresh or two
     const thisRequestId = ++latestLeaderboardRequestId;
     let closingData, arrivalData;
     try {
@@ -1234,7 +1605,7 @@ async function renderLeaderboard(app) {
 
   // Clean up the clock interval if the user navigates away - the main render() already
   // clears _leaderboardInterval, this just also stops the once-a-second clock tick.
-  exitBtn.addEventListener("click", () => clearInterval(clockInterval));
+  exitBtn.addEventListener("click", () => { clearInterval(clockInterval); unlockEvents.forEach((e) => document.removeEventListener(e, unlockSound, true)); stopCustomPlayback(); });
 }
 
 boot();
