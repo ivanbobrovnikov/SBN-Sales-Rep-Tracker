@@ -30,12 +30,17 @@ function loadDB() {
   const db = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
   if (!db.locations) db.locations = [];
   if (!db.goals) db.goals = [];
+  if (!db.sounds) db.sounds = [];
   if (db.ownerPasswordHash === undefined) db.ownerPasswordHash = OWNER_PASSWORD_HASH_ENV || null;
   return db;
 }
 function saveDB(db) {
   fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
 }
+
+// Logins signed before this moment are no longer accepted. Zero (the normal state) cuts nobody off; "Change password" can set it to log every other device out.
+let sessionsValidAfter = 0;
+try { sessionsValidAfter = Number(loadDB().sessionsValidAfter) || 0; } catch (e) { sessionsValidAfter = 0; }
 
 // ---------- Auth: single owner password, no roles - this tool is owner-only ----------
 function signSession() {
@@ -50,6 +55,7 @@ function verifySession(token) {
   const payload = Buffer.from(payloadB64, "base64").toString("utf8");
   const expectedSig = crypto.createHmac("sha256", SESSION_SECRET).update(payload).digest("hex");
   if (sig !== expectedSig) return false;
+  if (sessionsValidAfter > 0) { try { if (!(JSON.parse(payload).ts >= sessionsValidAfter)) return false; } catch (e) { return false; } }
   return true;
 }
 function requireOwner(req, res, next) {
@@ -343,6 +349,35 @@ app.post("/api/combined/job-edit", requireOwner, (req, res) => proxyWrite(req, r
 app.post("/api/combined/job-add", requireOwner, (req, res) => proxyWrite(req, res, "/api/cross-location/job-add"));
 app.post("/api/combined/job-merge", requireOwner, (req, res) => proxyWrite(req, res, "/api/cross-location/job-merge"));
 
+// ---------- Change password (Settings) ----------
+// Needs the CURRENT password even though you're logged in, so a phone left unlocked can't be used to lock you out. After 5 wrong tries it refuses for 15 minutes.
+const pwTries = { count: 0, lockedUntil: 0 };
+app.post("/api/change-password", requireOwner, (req, res) => {
+  const now = Date.now();
+  if (pwTries.lockedUntil > now) return res.status(429).json({ error: "Too many wrong tries. Wait a few minutes and try again." });
+  const { currentPassword, newPassword, logOutOthers } = req.body || {};
+  if (typeof currentPassword !== "string" || typeof newPassword !== "string") return res.status(400).json({ error: "Enter your current password and a new one." });
+  const db = loadDB();
+  if (!db.ownerPasswordHash || hash(currentPassword) !== db.ownerPasswordHash) {
+    pwTries.count += 1;
+    if (pwTries.count >= 5) { pwTries.lockedUntil = now + 15 * 60 * 1000; pwTries.count = 0; }
+    return res.status(401).json({ error: "The current password isn't right." });
+  }
+  pwTries.count = 0;
+  if (newPassword.length < 4) return res.status(400).json({ error: "The new password must be at least 4 characters." });
+  if (newPassword === currentPassword) return res.status(400).json({ error: "The new password must be different from the current one." });
+  db.ownerPasswordHash = hash(newPassword);
+  const others = logOutOthers === true;
+  if (others) { sessionsValidAfter = Date.now(); db.sessionsValidAfter = sessionsValidAfter; }   // every login made before this moment stops working
+  saveDB(db);
+  res.cookie("session", signSession(), { httpOnly: true, maxAge: 365 * 24 * 60 * 60 * 1000, sameSite: "lax" });   // this device stays logged in
+  res.json({ ok: true, loggedOutOthers: others });
+});
+// Lets Settings warn when the Railway recovery variable is still set (it would overwrite the password on every restart). Never reveals its value.
+app.get("/api/password-status", requireOwner, (req, res) => {
+  res.json({ resetVariableSet: !!process.env.RESET_OWNER_PASSWORD });
+});
+
 // Password recovery that leaves all your data alone. Only someone with access to the hosting
 // account can set environment variables, so this can't be triggered from the website:
 // set RESET_OWNER_PASSWORD, let it redeploy, log in with that password, then DELETE the
@@ -358,5 +393,73 @@ if (process.env.RESET_OWNER_PASSWORD) {
     console.log("RESET_OWNER_PASSWORD is shorter than 4 characters - ignored.");
   }
 }
+
+
+// ---------- Custom deal sounds ----------
+// Sounds the owner adds for the leaderboard's "Deal closed!" banner. The files live in the data folder (so every screen, including the TV, gets them);
+// only the owner can add, hear-list or delete them. A file is accepted only if its first bytes really are audio, whatever its name says.
+const SOUNDS_DIR = path.join(DATA_DIR, "sounds");
+const MAX_SOUND_BYTES = 3 * 1024 * 1024;
+const MAX_SOUNDS = 20;
+function detectAudio(b) {
+  if (!Buffer.isBuffer(b) || b.length < 12) return null;
+  const ascii = (a, z) => b.toString("latin1", a, z);
+  if (ascii(0, 4) === "RIFF" && ascii(8, 12) === "WAVE") return { mime: "audio/wav", ext: "wav" };
+  if (ascii(0, 4) === "OggS") return { mime: "audio/ogg", ext: "ogg" };
+  if (ascii(0, 4) === "fLaC") return { mime: "audio/flac", ext: "flac" };
+  if (ascii(4, 8) === "ftyp") return { mime: "audio/mp4", ext: "m4a" };
+  if (b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) return { mime: "audio/webm", ext: "webm" };
+  if (ascii(0, 3) === "ID3") return { mime: "audio/mpeg", ext: "mp3" };
+  if (b[0] === 0xff && (b[1] & 0xe0) === 0xe0) {                 // a frame header: MP3 (layer bits set) or raw AAC (layer bits zero)
+    if ((b[1] & 0x06) === 0) return { mime: "audio/aac", ext: "aac" };
+    if ((b[1] & 0x18) !== 0x08) return { mime: "audio/mpeg", ext: "mp3" };
+  }
+  return null;
+}
+const publicSound = (s) => ({ id: s.id, name: s.name, mime: s.mime, size: s.size, addedAt: s.addedAt });
+app.get("/api/sounds", requireOwner, (req, res) => {
+  res.json(loadDB().sounds.map(publicSound));
+});
+app.post("/api/sounds", requireOwner, express.raw({ type: () => true, limit: MAX_SOUND_BYTES }), (req, res) => {
+  const body = req.body;
+  if (!Buffer.isBuffer(body) || body.length === 0) return res.status(400).json({ error: "No sound was received." });
+  const kind = detectAudio(body);
+  if (!kind) return res.status(400).json({ error: "That doesn't look like an audio file. Use an MP3, WAV, OGG or M4A." });
+  const db = loadDB();
+  if (db.sounds.length >= MAX_SOUNDS) return res.status(400).json({ error: `You already have ${MAX_SOUNDS} sounds. Delete one first.` });
+  const name = String(req.query.name || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/[<>]/g, "").replace(/\s+/g, " ").trim().slice(0, 40) || "My sound";   // tabs and line breaks count as spaces; < and > are dropped
+  const id = newId();
+  try {
+    fs.mkdirSync(SOUNDS_DIR, { recursive: true });
+    fs.writeFileSync(path.join(SOUNDS_DIR, `${id}.${kind.ext}`), body);
+  } catch (e) { return res.status(500).json({ error: "Couldn't save that sound on the server." }); }
+  const sound = { id, name, mime: kind.mime, ext: kind.ext, size: body.length, addedAt: new Date().toISOString() };
+  db.sounds.push(sound);
+  saveDB(db);
+  res.json(publicSound(sound));
+});
+app.get("/api/sounds/:id/file", requireOwner, (req, res) => {
+  if (!/^[a-f0-9]{16}$/.test(req.params.id)) return res.status(404).json({ error: "Sound not found." });
+  const sound = loadDB().sounds.find((s) => s.id === req.params.id);
+  const file = sound && path.join(SOUNDS_DIR, `${sound.id}.${sound.ext}`);
+  if (!sound || !fs.existsSync(file)) return res.status(404).json({ error: "Sound not found." });
+  res.set({ "Content-Type": sound.mime, "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox", "Cache-Control": "private, max-age=86400" });
+  res.send(fs.readFileSync(file));
+});
+app.delete("/api/sounds/:id", requireOwner, (req, res) => {
+  if (!/^[a-f0-9]{16}$/.test(req.params.id)) return res.status(404).json({ error: "Sound not found." });
+  const db = loadDB();
+  const sound = db.sounds.find((s) => s.id === req.params.id);
+  if (!sound) return res.status(404).json({ error: "Sound not found." });
+  db.sounds = db.sounds.filter((s) => s.id !== sound.id);
+  saveDB(db);
+  try { fs.unlinkSync(path.join(SOUNDS_DIR, `${sound.id}.${sound.ext}`)); } catch (e) { /* the record is gone; a missing file is fine */ }
+  res.json({ ok: true });
+});
+// A file over the size limit gets a plain-English answer instead of an error page.
+app.use((err, req, res, next) => {
+  if (err && err.type === "entity.too.large" && req.path === "/api/sounds") return res.status(413).json({ error: "That file is too big. Keep it under 3 MB." });
+  next(err);
+});
 
 app.listen(PORT, () => console.log(`Combined rep tracker running on port ${PORT}`));
