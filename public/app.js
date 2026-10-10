@@ -325,9 +325,29 @@ async function renderSettings(content) {
       };
       paintStatus(tv);
       rokuBox.appendChild(statusLine);
+      // which sound to test: any built-in one, or one of your own that is ready for the Roku
+      const testSel = el("select", { style: "width:100%;margin:10px 0 8px" });
+      Object.entries(DEAL_SOUNDS).forEach(([k, d]) => testSel.appendChild(el("option", { value: k, text: "Test sound: " + d.name })));
+      sounds.filter((s) => s.tvReady).forEach((s) => testSel.appendChild(el("option", { value: "custom:" + s.id, text: "Test sound: 🎵 " + s.name })));
+      rokuBox.appendChild(testSel);
       rokuBox.appendChild(el("button", { class: "ghost", text: "Play a test sound on the TV", onclick: async () => {
-        try { await api("/api/tv/test-sound", { method: "POST", body: JSON.stringify({}) }); say("Asked the TV to play a test sound. It picks that up within about 15 seconds: look for a blue banner and listen. Then see what the TV reports below.", "var(--green)"); } catch (e) { say(e.message || "Couldn't ask the TV.", "var(--red)"); }
+        try { await api("/api/tv/test-sound", { method: "POST", body: JSON.stringify({ key: testSel.value }) }); say("Asked the TV to play a test sound. It picks that up within about 15 seconds: look for a blue banner and listen. Then see what the TV reports below.", "var(--green)"); } catch (e) { say(e.message || "Couldn't ask the TV.", "var(--red)"); }
       } }));
+      // all six one after another, far enough apart (the TV checks every 15 seconds) that it sees each one separately
+      const allBtn = el("button", { class: "ghost", style: "margin-left:8px", text: "Test all six built-in sounds", onclick: async () => {
+        allBtn.disabled = true;
+        const keys = Object.keys(DEAL_SOUNDS), gap = window.TV_TEST_GAP_MS || 18000;
+        try {
+          for (let i = 0; i < keys.length; i++) {
+            if (!document.body.contains(note)) return;          // you left this page: stop
+            say(`Testing ${i + 1} of ${keys.length}: ${DEAL_SOUNDS[keys[i]].name}. Listen for it, and watch the list below. This takes about two minutes: keep this page open.`, "var(--green)");
+            await api("/api/tv/test-sound", { method: "POST", body: JSON.stringify({ key: keys[i] }) });
+            if (i < keys.length - 1) await new Promise((r) => setTimeout(r, gap));
+          }
+          say("All six have been sent. Each should show sound_ok in the list below once the TV has played it. Tell me which ones did not.", "var(--green)");
+        } catch (e) { say(e.message || "Couldn't ask the TV.", "var(--red)"); } finally { allBtn.disabled = false; }
+      } });
+      rokuBox.appendChild(allBtn);
       rokuBox.appendChild(reportsBox);
       window._rokuTimer = setInterval(async () => {
         if (!document.body.contains(statusLine)) { clearInterval(window._rokuTimer); window._rokuTimer = null; return; }
