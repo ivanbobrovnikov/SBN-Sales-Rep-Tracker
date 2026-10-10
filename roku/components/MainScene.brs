@@ -17,6 +17,10 @@ sub init()
     m.diagLabel = m.top.findNode("diag")
     m.diagTimer = m.top.findNode("diagTimer")
     m.soundTimer = m.top.findNode("soundTimer")
+    m.countTimer = m.top.findNode("countTimer")
+    m.confettiTimer = m.top.findNode("confettiTimer")
+    m.confetti = m.top.findNode("confetti")
+    m.confettiAnim = m.top.findNode("confettiAnim")
     m.audio = m.top.findNode("audioPlayer")
     m.state = tv_newState()
     m.have = {}
@@ -34,6 +38,13 @@ sub init()
     m.volume = 70
     m.player = invalid
     m.soundMethod = "auto"
+    m.fonts = {}
+    m.rankState = tv_newRankState()
+    m.prevCents = {}
+    m.amountLabels = {}
+    m.anims = []
+    m.rowsSig = "(nothing drawn yet)"      ' can never equal a real signature, so the very first screen (even an empty one) is always drawn
+    m.confettiOn = true
     m.testSeq = invalid
     m.sndPath = ""
     m.sndLabel = ""
@@ -46,7 +57,19 @@ sub init()
     m.bannerTimer.observeField("fire", "bannerDone")
     m.diagTimer.observeField("fire", "clearDiag")
     m.soundTimer.observeField("fire", "onSoundTimeout")
+    m.countTimer.observeField("fire", "tickCount")
+    m.confettiTimer.observeField("fire", "hideConfetti")
     m.audio.observeField("state", "onAudioState")
+    setFont(m.top.findNode("title"), "bold", 66)
+    setFont(m.clockLabel, "semibold", 60)
+    setFont(m.top.findNode("bannerTop"), "semibold", 30)
+    setFont(m.top.findNode("bannerMain"), "bold", 68)
+    setFont(m.top.findNode("bannerSub"), "semibold", 34)
+    for i = 0 to 2
+        setFont(m.top.findNode("tile" + i.ToStr() + "cap"), "semibold", 22)
+        setFont(m.top.findNode("tile" + i.ToStr() + "amt"), "bold", 56)
+        setFont(m.top.findNode("tile" + i.ToStr() + "sub"), "semibold", 28)
+    end for
     if m.cfg = invalid or m.cfg.server = invalid or m.cfg.key = invalid
         m.statusLabel.text = "This app is not set up. Download it again from the tracker's Settings."
         print "TV> no config"
@@ -138,6 +161,8 @@ sub applyFeed(feed as object)
         m.statusLabel.text = "Not reachable right now: " + names
         print "TV> status " + m.statusLabel.text
     end if
+    if feed.confetti <> invalid then m.confettiOn = feed.confetti
+    if feed.totals <> invalid then showTotals(feed.totals)
     rows = feed.rows
     if rows = invalid then rows = []
     renderRows(rows)
@@ -172,7 +197,57 @@ sub tickClock()
     m.clockLabel.text = tv_clockText(m.clockBase, elapsed)
 end sub
 
+' One font per weight and size, made once and shared. Oswald is the typeface the web leaderboard uses.
+sub setFont(label as object, weight as string, size as integer)
+    key = weight + size.ToStr()
+    if not m.fonts.DoesExist(key)
+        f = CreateObject("roSGNode", "Font")
+        if weight = "bold"
+            f.uri = "pkg:/fonts/Oswald-Bold.ttf"
+        else
+            f.uri = "pkg:/fonts/Oswald-SemiBold.ttf"
+        end if
+        f.size = size
+        m.fonts[key] = f
+    end if
+    label.font = m.fonts[key]
+end sub
+
+sub showTotals(t as object)
+    m.top.findNode("tile0amt").text = tv_money(t.closedCents)
+    deals = "deals"
+    if t.closeCount = 1 then deals = "deal"
+    m.top.findNode("tile0sub").text = t.closeCount.ToStr() + " " + deals
+    m.top.findNode("tile1amt").text = t.arrivedCount.ToStr()
+    cars = "cars"
+    if t.arrivedCount = 1 then cars = "car"
+    m.top.findNode("tile1sub").text = cars + " on site"
+    m.top.findNode("tile2amt").text = tv_money(t.commissionCents)
+    m.top.findNode("tile2sub").text = "from arrivals"
+end sub
+
+' what the screen would look like for these rows, as one line of text: if it is the same as last time nothing is redrawn (no flicker, no wasted work,
+' and a count-up that is in progress isn't interrupted)
+function rowsSignature(rows as object, now as dynamic) as string
+    sig = ""
+    for each r in rows
+        p = tv_goalPct(r.goal)
+        sig = sig + r.name + "|" + tv_text(r.closedCents) + "|" + tv_text(r.arrivedCount) + "|" + tv_text(r.commissionCents) + "|" + tv_text(r.closeCount) + "|" + p.ToStr() + "|" + tv_arrowFor(m.rankState, r.name, now) + ";"
+    end for
+    return sig
+end function
+
 sub renderRows(rows as object)
+    now = Uptime(0)
+    moved = tv_updateRanks(m.rankState, rows, now)
+    for each n in moved
+        print "TV> rank change " + n + " " + tv_arrowFor(m.rankState, n, now)
+    end for
+    sig = rowsSignature(rows, now)
+    if sig = m.rowsSig then return
+    m.rowsSig = sig
+    m.anims = []
+    m.amountLabels = {}
     while m.rowsGroup.getChildCount() > 0
         m.rowsGroup.removeChildIndex(0)
     end while
@@ -183,71 +258,175 @@ sub renderRows(rows as object)
     end if
     m.emptyLabel.visible = false
     shown = tv_visibleCount(rows.Count())
-    y = 210
+    y = 328
     for i = 0 to shown - 1
-        addRow(i, rows[i], y)
-        y = y + 112
+        addRow(i, rows[i], y, tv_arrowFor(m.rankState, rows[i].name, now))
+        y = y + 114
     end for
     if rows.Count() > shown
-        more = makeLabel(180, y + 4, 1560, 36, "+ " + (rows.Count() - shown).ToStr() + " more", "font:SmallSystemFont", "0x7F8CA6FF")
+        more = makeLabel(100, y + 2, 1720, 36, "+ " + (rows.Count() - shown).ToStr() + " more", "semibold", 26, "0x7F8CA6FF")
         more.horizAlign = "center"
         m.rowsGroup.appendChild(more)
     end if
+    ' a rep whose total went UP since last time counts up to the new amount instead of jumping
+    for i = 0 to shown - 1
+        r = rows[i]
+        if m.prevCents.DoesExist(r.name)
+            before = m.prevCents[r.name]
+            if r.closedCents > before and m.amountLabels.DoesExist(r.name)
+                lbl = m.amountLabels[r.name]
+                lbl.text = tv_money(before)
+                lbl.color = "0x5BD68AFF"
+                m.anims.Push({ label: lbl, from: before, to: r.closedCents, start: now })
+                print "TV> count " + r.name + " " + before.ToStr() + " to " + r.closedCents.ToStr()
+            end if
+        end if
+    end for
+    for each r in rows
+        m.prevCents[r.name] = r.closedCents
+    end for
+    if m.anims.Count() > 0 then m.countTimer.control = "start"
 end sub
 
-sub addRow(i as integer, r as object, y as integer)
+sub tickCount()
+    now = Uptime(0)
+    keep = []
+    for each a in m.anims
+        t = (now - a.start) / 1.4
+        if t >= 1
+            a.label.text = tv_money(a.to)
+            a.label.color = "0x7FB0FFFF"
+        else
+            a.label.text = tv_money(tv_countValue(a.from, a.to, t))
+            keep.Push(a)
+        end if
+    end for
+    m.anims = keep
+    if keep.Count() = 0 then m.countTimer.control = "stop"
+end sub
+
+sub addRow(i as integer, r as object, y as integer, arrow as string)
     card = CreateObject("roSGNode", "Rectangle")
-    card.translation = [180, y]
-    card.width = 1560
-    card.height = 100
+    card.translation = [100, y]
+    card.width = 1720
+    card.height = 102
     if i = 0
-        card.color = "0x1C2A44FF"
+        card.color = "0x1A2A4DFF"
     else
-        card.color = "0x151E30FF"
+        card.color = "0x111A30FF"
     end if
     m.rowsGroup.appendChild(card)
+    stripe = CreateObject("roSGNode", "Rectangle")
+    stripe.translation = [100, y]
+    stripe.width = 8
+    stripe.height = 102
+    stripe.color = rankColor(i)
+    m.rowsGroup.appendChild(stripe)
 
-    badge = CreateObject("roSGNode", "Rectangle")
-    badge.translation = [210, y + 18]
-    badge.width = 64
-    badge.height = 64
-    badge.color = rankColor(i)
-    m.rowsGroup.appendChild(badge)
-    rank = makeLabel(210, y + 18, 64, 64, (i + 1).ToStr(), "font:LargeBoldSystemFont", "0x0A1020FF")
+    rank = makeLabel(122, y + 14, 60, 76, (i + 1).ToStr(), "bold", 52, rankColor(i))
     rank.horizAlign = "center"
-    rank.vertAlign = "center"
     m.rowsGroup.appendChild(rank)
+    if arrow <> ""
+        a = CreateObject("roSGNode", "Poster")
+        if arrow = "up"
+            a.uri = "pkg:/images/arrow_up.png"
+            a.blendColor = "0x22C55EFF"
+        else
+            a.uri = "pkg:/images/arrow_down.png"
+            a.blendColor = "0xEF4444FF"
+        end if
+        a.translation = [188, y + 38]
+        a.width = 26
+        a.height = 26
+        a.loadDisplayMode = "scaleToFit"
+        m.rowsGroup.appendChild(a)
+    end if
 
-    m.rowsGroup.appendChild(makeLabel(310, y + 20, 640, 60, r.name, "font:LargeBoldSystemFont", "0xE8EDF5FF"))
+    badge = CreateObject("roSGNode", "Poster")
+    badge.uri = "pkg:/images/circle.png"
+    badge.translation = [226, y + 9]
+    badge.width = 84
+    badge.height = 84
+    badge.loadDisplayMode = "scaleToFit"
+    if r.color <> invalid then badge.blendColor = r.color else badge.blendColor = "0x3B82F6FF"
+    m.rowsGroup.appendChild(badge)
+    ini = r.initials
+    if ini = invalid then ini = "?"
+    initials = makeLabel(226, y + 9, 84, 84, ini, "semibold", 36, "0xFFFFFFFF")
+    initials.horizAlign = "center"
+    initials.vertAlign = "center"
+    m.rowsGroup.appendChild(initials)
 
-    m.rowsGroup.appendChild(makeLabel(990, y + 8, 320, 28, "CLOSING TODAY", "font:SmallestSystemFont", "0x7F8CA6FF"))
-    m.rowsGroup.appendChild(makeLabel(990, y + 32, 330, 40, tv_money(r.closedCents), "font:MediumBoldSystemFont", "0x7FB0FFFF"))
+    hasGoal = (tv_goalPct(r.goal) >= 0)
+    if hasGoal
+        m.rowsGroup.appendChild(makeLabel(338, y - 2, 560, 64, r.name, "bold", 46, "0xF2F5FBFF"))
+        pct = tv_goalPct(r.goal)
+        track = CreateObject("roSGNode", "Rectangle")
+        track.translation = [338, y + 62]
+        track.width = 420
+        track.height = 14
+        track.color = "0x25324FFF"
+        m.rowsGroup.appendChild(track)
+        fillW = tv_barWidth(pct, 420)
+        if fillW > 0
+            fill = CreateObject("roSGNode", "Rectangle")
+            fill.translation = [338, y + 62]
+            fill.width = fillW
+            fill.height = 14
+            fill.color = tv_goalColor(pct)
+            m.rowsGroup.appendChild(fill)
+        end if
+        m.rowsGroup.appendChild(makeLabel(776, y + 52, 160, 34, tv_pctText(r.goal), "semibold", 26, tv_goalColor(pct)))
+        m.rowsGroup.appendChild(makeLabel(338, y + 78, 620, 24, tv_goalText(r.goal), "semibold", 18, "0x8393B2FF"))
+    else
+        m.rowsGroup.appendChild(makeLabel(338, y + 12, 600, 70, r.name, "bold", 50, "0xF2F5FBFF"))
+    end if
+
+    m.rowsGroup.appendChild(makeLabel(960, y + 6, 340, 26, "CLOSING TODAY", "semibold", 20, "0x8393B2FF"))
+    amt = makeLabel(960, y + 15, 400, 70, tv_money(r.closedCents), "bold", 50, "0x7FB0FFFF")
+    m.rowsGroup.appendChild(amt)
+    m.amountLabels[r.name] = amt
     deals = "deals"
     if r.closeCount = 1 then deals = "deal"
-    m.rowsGroup.appendChild(makeLabel(990, y + 70, 320, 26, r.closeCount.ToStr() + " " + deals, "font:SmallestSystemFont", "0xB4C0D8FF"))
+    m.rowsGroup.appendChild(makeLabel(960, y + 74, 340, 28, r.closeCount.ToStr() + " " + deals, "semibold", 22, "0xB4C0D8FF"))
 
-    m.rowsGroup.appendChild(makeLabel(1370, y + 8, 340, 28, "ARRIVED TODAY", "font:SmallestSystemFont", "0x7F8CA6FF"))
-    m.rowsGroup.appendChild(makeLabel(1370, y + 32, 340, 40, r.arrivedCount.ToStr(), "font:MediumBoldSystemFont", "0xE8EDF5FF"))
-    m.rowsGroup.appendChild(makeLabel(1370, y + 70, 340, 26, tv_money(r.commissionCents), "font:SmallestSystemFont", "0x5BD68AFF"))
+    m.rowsGroup.appendChild(makeLabel(1440, y + 6, 340, 26, "ARRIVED TODAY", "semibold", 20, "0x8393B2FF"))
+    m.rowsGroup.appendChild(makeLabel(1440, y + 15, 340, 70, r.arrivedCount.ToStr(), "bold", 50, "0xF2F5FBFF"))
+    m.rowsGroup.appendChild(makeLabel(1440, y + 74, 340, 28, tv_money(r.commissionCents) + " commission", "semibold", 22, "0x5BD68AFF"))
 end sub
 
 function rankColor(i as integer) as string
     if i = 0 then return "0xE0B13AFF"
     if i = 1 then return "0xB8C0CCFF"
     if i = 2 then return "0xC47F4AFF"
-    return "0x3A4A6BFF"
+    return "0x4A5B80FF"
 end function
 
-function makeLabel(x as integer, y as integer, w as integer, h as integer, text as string, font as string, color as string) as object
+function makeLabel(x as integer, y as integer, w as integer, h as integer, text as string, weight as string, size as integer, color as string) as object
     lbl = CreateObject("roSGNode", "Label")
     lbl.translation = [x, y]
     lbl.width = w
     lbl.height = h
     lbl.text = text
-    lbl.font = font
+    setFont(lbl, weight, size)
     lbl.color = color
     return lbl
 end function
+
+sub startConfetti()
+    if not m.confettiOn then return
+    m.confettiAnim.control = "stop"
+    m.confetti.translation = [0, -1080]
+    m.confetti.visible = true
+    m.confettiAnim.control = "start"
+    m.confettiTimer.control = "start"
+    print "TV> confetti"
+end sub
+
+sub hideConfetti()
+    m.confetti.visible = false
+    m.confettiAnim.control = "stop"
+end sub
 
 ' ---- the "Deal closed" banner, one at a time, with the deal's own sound ----
 sub showNextBanner()
@@ -262,6 +441,7 @@ sub showNextBanner()
         m.top.findNode("bannerMain").text = "Playing a test sound..."
         m.top.findNode("bannerSub").text = "If you hear nothing, check the TV volume, then look at ROKU TV in the tracker's Settings"
         m.banner.visible = true
+        startConfetti()
         print "TV> banner SOUND TEST"
         playSound(c.sound, "test")
         m.bannerTimer.control = "start"
@@ -278,6 +458,7 @@ sub showNextBanner()
     if more > 0 then detail = detail + "   (+" + more.ToStr() + " more)"
     m.top.findNode("bannerSub").text = detail
     m.banner.visible = true
+    startConfetti()
     print "TV> banner " + c.repName + " " + tv_money(c.priceCents)
     playSound(c.sound, c.repName)
     m.bannerTimer.control = "start"

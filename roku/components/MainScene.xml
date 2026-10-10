@@ -3,25 +3,49 @@
   <script type="text/brightscript" uri="pkg:/components/MainScene.brs" />
   <script type="text/brightscript" uri="pkg:/source/logic.brs" />
   <children>
-    <Rectangle id="bg" color="0x0A1020FF" width="1920" height="1080" translation="[0,0]" />
-    <Label id="title" text="TODAY'S LEADERBOARD" font="font:LargeBoldSystemFont" color="0xE8EDF5FF" translation="[180,60]" width="1100" height="70" />
-    <Label id="subtitle" text="All locations combined, ranked by total value closed today" font="font:SmallSystemFont" color="0x7F8CA6FF" translation="[180,134]" width="1300" height="40" />
-    <Label id="clock" text="" font="font:LargeSystemFont" color="0x8FA3C8FF" translation="[1240,70]" width="500" height="60" horizAlign="right" />
+    <Rectangle id="bg" color="0x070D1CFF" width="1920" height="1080" translation="[0,0]" />
+    <Rectangle id="headerBand" color="0x0C1730FF" width="1920" height="186" translation="[0,0]" />
+    <Poster id="logo" uri="pkg:/images/logo_tv.png" translation="[100,40]" width="340" height="104" loadDisplayMode="scaleToFit" />
+    <Label id="title" text="TODAY'S LEADERBOARD" color="0xF2F5FBFF" translation="[480,30]" width="900" height="84" />
+    <Label id="subtitle" text="All locations combined  -  ranked by total value closed today" font="font:SmallSystemFont" color="0x8393B2FF" translation="[484,116]" width="1000" height="40" />
+    <Label id="clock" text="" color="0xA9BBDCFF" translation="[1320,40]" width="500" height="84" horizAlign="right" />
+    <Rectangle id="accent" color="0x3B82F6FF" translation="[100,180]" width="1720" height="4" />
+    <Rectangle id="tile0panel" color="0x111A30FF" translation="[100,204]" width="520" height="104" />
+    <Rectangle id="tile0bar" color="0x3B82F6FF" translation="[100,204]" width="6" height="104" />
+    <Label id="tile0cap" text="CLOSED TODAY" color="0x8393B2FF" translation="[128,208]" width="400" height="34" />
+    <Label id="tile0amt" text="" color="0xF2F5FBFF" translation="[128,230]" width="330" height="76" />
+    <Label id="tile0sub" text="" color="0xA9BBDCFF" translation="[370,256]" width="230" height="40" horizAlign="right" />
+    <Rectangle id="tile1panel" color="0x111A30FF" translation="[700,204]" width="520" height="104" />
+    <Rectangle id="tile1bar" color="0x22C55EFF" translation="[700,204]" width="6" height="104" />
+    <Label id="tile1cap" text="ARRIVED TODAY" color="0x8393B2FF" translation="[728,208]" width="400" height="34" />
+    <Label id="tile1amt" text="" color="0xF2F5FBFF" translation="[728,230]" width="330" height="76" />
+    <Label id="tile1sub" text="" color="0xA9BBDCFF" translation="[970,256]" width="230" height="40" horizAlign="right" />
+    <Rectangle id="tile2panel" color="0x111A30FF" translation="[1300,204]" width="520" height="104" />
+    <Rectangle id="tile2bar" color="0xF59E0BFF" translation="[1300,204]" width="6" height="104" />
+    <Label id="tile2cap" text="COMMISSION TODAY" color="0x8393B2FF" translation="[1328,208]" width="400" height="34" />
+    <Label id="tile2amt" text="" color="0xF2F5FBFF" translation="[1328,230]" width="330" height="76" />
+    <Label id="tile2sub" text="" color="0xA9BBDCFF" translation="[1570,256]" width="230" height="40" horizAlign="right" />
     <Group id="rows" translation="[0,0]" />
-    <Label id="empty" text="" font="font:LargeSystemFont" color="0x7F8CA6FF" translation="[180,420]" width="1560" height="80" horizAlign="center" visible="false" />
-    <Label id="status" text="" font="font:SmallSystemFont" color="0xFFB454FF" translation="[180,1024]" width="900" height="36" />
-    <Group id="banner" translation="[240,24]" visible="false">
-      <Rectangle id="bannerBg" color="0x1F9D55FF" width="1440" height="172" />
-      <Label id="bannerTop" text="DEAL CLOSED" font="font:SmallBoldSystemFont" color="0xE3FFEEFF" translation="[0,14]" width="1440" height="34" horizAlign="center" />
-      <Label id="bannerMain" text="" font="font:LargeBoldSystemFont" color="0xFFFFFFFF" translation="[0,50]" width="1440" height="70" horizAlign="center" />
-      <Label id="bannerSub" text="" font="font:MediumSystemFont" color="0xE3FFEEFF" translation="[0,120]" width="1440" height="40" horizAlign="center" />
+    <Label id="empty" text="" font="font:LargeSystemFont" color="0x7F8CA6FF" translation="[100,520]" width="1720" height="80" horizAlign="center" visible="false" />
+    <Poster id="confetti" uri="pkg:/images/confetti.png" translation="[0,-1080]" width="1920" height="2160" loadDisplayMode="scaleToFit" visible="false" />
+    <Group id="banner" translation="[160,24]" visible="false">
+      <Rectangle id="bannerBg" color="0x1F9D55FF" width="1600" height="190" />
+      <Label id="bannerTop" text="DEAL CLOSED" color="0xE3FFEEFF" translation="[0,10]" width="1600" height="44" horizAlign="center" />
+      <Label id="bannerMain" text="" color="0xFFFFFFFF" translation="[0,46]" width="1600" height="90" horizAlign="center" />
+      <Label id="bannerSub" text="" color="0xE3FFEEFF" translation="[0,132]" width="1600" height="50" horizAlign="center" />
     </Group>
-    <Label id="diag" text="" font="font:SmallestSystemFont" color="0x6F7C96FF" translation="[1000,1030]" width="740" height="30" horizAlign="right" />
+    <Label id="status" text="" font="font:SmallSystemFont" color="0xFFB454FF" translation="[100,1036]" width="900" height="36" />
+    <Label id="diag" text="" font="font:SmallestSystemFont" color="0x6F7C96FF" translation="[1000,1042]" width="820" height="30" horizAlign="right" />
     <Audio id="audioPlayer" />
+    <Animation id="confettiAnim" duration="3.4" repeat="false" easeFunction="linear">
+      <Vector2DFieldInterpolator id="confettiInterp" fieldToInterp="confetti.translation" key="[0.0, 1.0]" keyValue="[[0.0, -1080.0], [0.0, 0.0]]" />
+    </Animation>
     <Timer id="pollTimer" repeat="true" duration="15" />
     <Timer id="clockTimer" repeat="true" duration="1" />
     <Timer id="bannerTimer" repeat="false" duration="9" />
     <Timer id="diagTimer" repeat="false" duration="8" />
     <Timer id="soundTimer" repeat="false" duration="4" />
+    <Timer id="countTimer" repeat="true" duration="0.05" />
+    <Timer id="confettiTimer" repeat="false" duration="3.6" />
   </children>
 </component>
