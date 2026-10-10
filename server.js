@@ -31,6 +31,7 @@ function loadDB() {
   if (!db.locations) db.locations = [];
   if (!db.goals) db.goals = [];
   if (!db.sounds) db.sounds = [];
+  if (!db.repSounds) db.repSounds = [];
   if (db.ownerPasswordHash === undefined) db.ownerPasswordHash = OWNER_PASSWORD_HASH_ENV || null;
   return db;
 }
@@ -452,10 +453,42 @@ app.delete("/api/sounds/:id", requireOwner, (req, res) => {
   const sound = db.sounds.find((s) => s.id === req.params.id);
   if (!sound) return res.status(404).json({ error: "Sound not found." });
   db.sounds = db.sounds.filter((s) => s.id !== sound.id);
+  db.repSounds = db.repSounds.filter((r) => r.choice !== "custom:" + sound.id);   // a rep set to this sound goes back to the default
   saveDB(db);
   try { fs.unlinkSync(path.join(SOUNDS_DIR, `${sound.id}.${sound.ext}`)); } catch (e) { /* the record is gone; a missing file is fine */ }
   res.json({ ok: true });
 });
+
+// ---------- A sound for each rep ----------
+// When a rep closes a deal, THEIR sound plays on the leaderboard instead of the screen's usual one. A rep is matched by name (ignoring capitals and extra
+// spaces), so the same person at two locations is one rep. The choice is a built-in sound, or one of the owner's own uploaded sounds. Reps with
+// nothing set ("default") use whatever each screen is set to.
+const BUILTIN_SOUND_KEYS = ["chaching", "airhorn", "kazoo", "boing", "party", "duck"];   // must match the built-in sounds on the leaderboard (a test checks that they do)
+const MAX_REP_SOUNDS = 200;
+const repKey = (name) => String(name || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+const repDisplayName = (name) => String(name || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/[<>]/g, "").replace(/\s+/g, " ").trim().slice(0, 60);
+app.get("/api/rep-sounds", requireOwner, (req, res) => {
+  res.json(loadDB().repSounds.map((r) => ({ key: r.key, name: r.name, choice: r.choice })));
+});
+app.put("/api/rep-sounds", requireOwner, (req, res) => {
+  const { name, choice } = req.body || {};
+  const display = repDisplayName(name), key = repKey(display);
+  if (typeof name !== "string" || !key) return res.status(400).json({ error: "Choose a rep." });
+  const db = loadDB();
+  if (choice === "default" || choice === null || choice === "") {                    // back to "use the screen's choice"
+    db.repSounds = db.repSounds.filter((r) => r.key !== key);
+    saveDB(db);
+    return res.json({ ok: true, key, choice: "default" });
+  }
+  const valid = typeof choice === "string" && (BUILTIN_SOUND_KEYS.includes(choice) || (/^custom:[a-f0-9]{16}$/.test(choice) && db.sounds.some((s) => s.id === choice.slice(7))));
+  if (!valid) return res.status(400).json({ error: "That sound isn't available." });
+  const existing = db.repSounds.find((r) => r.key === key);
+  if (!existing && db.repSounds.length >= MAX_REP_SOUNDS) return res.status(400).json({ error: "That's too many reps with their own sound." });
+  if (existing) { existing.name = display; existing.choice = choice; } else db.repSounds.push({ key, name: display, choice });
+  saveDB(db);
+  res.json({ ok: true, key, name: display, choice });
+});
+
 // A file over the size limit gets a plain-English answer instead of an error page.
 app.use((err, req, res, next) => {
   if (err && err.type === "entity.too.large" && req.path === "/api/sounds") return res.status(413).json({ error: "That file is too big. Keep it under 3 MB." });
