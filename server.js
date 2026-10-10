@@ -32,6 +32,8 @@ function loadDB() {
   if (!db.goals) db.goals = [];
   if (!db.sounds) db.sounds = [];
   if (!db.repSounds) db.repSounds = [];
+  if (!db.tv) db.tv = { keyHash: null, createdAt: null, settings: { defaultSound: "random", volume: "medium" } };
+  if (!db.tv.settings) db.tv.settings = { defaultSound: "random", volume: "medium" };
   if (db.ownerPasswordHash === undefined) db.ownerPasswordHash = OWNER_PASSWORD_HASH_ENV || null;
   return db;
 }
@@ -161,9 +163,9 @@ function periodQueryString(query) {
   return new URLSearchParams(params).toString();
 }
 
-app.get("/api/combined/salesrep-stats", requireOwner, async (req, res) => {
-  const db = loadDB();
-  const qs = periodQueryString(req.query);
+// The combined sales rep numbers, lifted out of the route so the TV feed uses exactly the numbers the web leaderboard uses.
+async function buildCombinedStats(db, query) {
+  const qs = periodQueryString(query);
   const results = [];
   const errors = [];
   await Promise.all(db.locations.map(async (loc) => {
@@ -263,8 +265,9 @@ app.get("/api/combined/salesrep-stats", requireOwner, async (req, res) => {
   // Bookings the owner marked as reschedules are kept out of the closing numbers; they come through here so the
   // Audit tab can list them and offer an undo.
   const leftOut = results.flatMap((l) => (l.leftOut || []).map((x) => ({ ...x, locationId: l.locationId, locationName: l.locationName })));
-  res.json({ perRep, errors, locationsQueried: results.map((r) => r.locationName), leftOut });
-});
+  return { perRep, errors, locationsQueried: results.map((r) => r.locationName), leftOut };
+}
+app.get("/api/combined/salesrep-stats", requireOwner, async (req, res) => res.json(await buildCombinedStats(loadDB(), req.query)));
 
 // ---------- Combined Cleanup ----------
 app.get("/api/combined/cleanup-list", requireOwner, async (req, res) => {
@@ -417,7 +420,7 @@ function detectAudio(b) {
   }
   return null;
 }
-const publicSound = (s) => ({ id: s.id, name: s.name, mime: s.mime, size: s.size, addedAt: s.addedAt });
+const publicSound = (s) => ({ id: s.id, name: s.name, mime: s.mime, size: s.size, addedAt: s.addedAt, tvReady: !!s.tvWav });
 app.get("/api/sounds", requireOwner, (req, res) => {
   res.json(loadDB().sounds.map(publicSound));
 });
@@ -456,6 +459,7 @@ app.delete("/api/sounds/:id", requireOwner, (req, res) => {
   db.repSounds = db.repSounds.filter((r) => r.choice !== "custom:" + sound.id);   // a rep set to this sound goes back to the default
   saveDB(db);
   try { fs.unlinkSync(path.join(SOUNDS_DIR, `${sound.id}.${sound.ext}`)); } catch (e) { /* the record is gone; a missing file is fine */ }
+  try { fs.unlinkSync(path.join(SOUNDS_DIR, `${sound.id}.tv.wav`)); } catch (e) { /* it may never have had a Roku copy */ }
   res.json({ ok: true });
 });
 
@@ -489,9 +493,178 @@ app.put("/api/rep-sounds", requireOwner, (req, res) => {
   res.json({ ok: true, key, name: display, choice });
 });
 
+// =====================================================================================================================================
+// ROKU TV APP
+// A Roku can't show a web page, so the leaderboard is a small private Roku app instead. It shows the same ranking and the same "Deal closed"
+// banners, and plays the same sounds. It asks the tracker for a TV-ONLY feed using a TV key; that key can read the leaderboard and fetch the
+// sounds and can do NOTHING else, and the owner can turn it off at any time. "Download the Roku app" makes a fresh key and builds the app with
+// that key already inside, so nothing has to be typed on the remote.
+// =====================================================================================================================================
+const zlib = require("zlib");
+const ROKU_DIR = path.join(__dirname, "roku");
+const TV_VOLUMES = { low: 40, medium: 70, high: 100 };
+const sha256 = (x) => crypto.createHash("sha256").update(String(x)).digest("hex");
+const hashInt = (x) => parseInt(sha256(x).slice(0, 8), 16);
+
+function tvAuth(req, res, next) {
+  const db = loadDB();
+  const key = String(req.get("x-tv-key") || "");
+  if (!db.tv.keyHash || !key) return res.status(401).json({ error: "Not allowed." });
+  const a = Buffer.from(sha256(key)), b = Buffer.from(db.tv.keyHash);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.status(401).json({ error: "Not allowed." });
+  next();
+}
+
+// Which sound a deal gets on the TV, worked out here so the Roku only has to play it: the rep's own sound if they have one and it is ready for the Roku,
+// otherwise the TV's default. "Random" is picked from the deal itself, so the same deal always gets the same sound. Off means silent for everyone.
+function resolveTvSound(db, repName, closeKey) {
+  const settings = db.tv.settings;
+  if (settings.defaultSound === "off") return null;
+  const readyCustom = db.sounds.filter((s) => s.tvWav).map((s) => s.id);
+  const usable = (c) => typeof c === "string" && (BUILTIN_SOUND_KEYS.includes(c) || (c.indexOf("custom:") === 0 && readyCustom.includes(c.slice(7))));
+  const rep = db.repSounds.find((r) => r.key === repKey(repName));
+  let choice = rep && usable(rep.choice) ? rep.choice : settings.defaultSound;
+  const fallback = BUILTIN_SOUND_KEYS[hashInt("fallback:" + closeKey) % BUILTIN_SOUND_KEYS.length];
+  if (choice === "random") { const pool = BUILTIN_SOUND_KEYS.concat(readyCustom.map((id) => "custom:" + id)); choice = pool[hashInt(closeKey) % pool.length]; }
+  else if (choice === "custom-random") choice = readyCustom.length ? "custom:" + readyCustom[hashInt(closeKey) % readyCustom.length] : fallback;
+  if (BUILTIN_SOUND_KEYS.includes(choice)) return { kind: "builtin", key: choice };
+  if (usable(choice)) return { kind: "custom", id: choice.slice(7), fallback };
+  return { kind: "builtin", key: fallback };       // the choice isn't ready for the Roku (yet): a built-in sound, never silence
+}
+const easternDay = (d) => new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+
+// Exactly what the web leaderboard shows: the same two questions (what each rep closed today; what actually arrived today), merged by rep name,
+// ranked by value closed, then deals closed, then commission, then name. All money goes out as WHOLE CENTS: the TV's numbers are single-precision
+// and would lose cents on larger amounts if decimals were used.
+async function buildTvFeed(db) {
+  const today = easternDay(new Date());
+  const [closing, arrival] = await Promise.all([buildCombinedStats(db, { period: "day", date: today, dateBasis: "closed" }), buildCombinedStats(db, { period: "day", date: today })]);
+  const byName = {};
+  closing.perRep.forEach((r) => { byName[r.name] = byName[r.name] || {}; byName[r.name].closing = r; });
+  arrival.perRep.forEach((r) => { byName[r.name] = byName[r.name] || {}; byName[r.name].arrival = r; });
+  const merged = Object.entries(byName).map(([name, { closing: c, arrival: a }]) => ({ name, closeCount: c ? c.closeCount : 0, closedValue: c ? c.closedValue : 0, arrivedCount: a ? a.arrivedCount : 0, commission: a ? a.actualCommission : 0 }));
+  merged.sort((x, y) => y.closedValue - x.closedValue || y.closeCount - x.closeCount || y.commission - x.commission || x.name.localeCompare(y.name));
+  const cents = (n) => Math.round((Number(n) || 0) * 100);
+  const rows = merged.map((r, i) => ({ rank: i + 1, name: r.name, closedCents: cents(r.closedValue), closeCount: r.closeCount, arrivedCount: r.arrivedCount, commissionCents: cents(r.commission) }));
+  const now = Date.now();
+  const closes = closing.perRep.flatMap((r) => r.closes.map((c) => {
+    const key = `${c.locationId}:${c.id}`, at = Date.parse(c.closedAt);
+    return { key, repName: r.name, priceCents: cents(c.basePrice), service: c.baseService || c.car || "", location: c.locationName || "", ageSec: Number.isFinite(at) ? Math.round((now - at) / 1000) : null, sound: resolveTvSound(db, r.name, key) };
+  }));
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hourCycle: "h23", hour: "numeric", minute: "numeric", second: "numeric" }).formatToParts(new Date(now)).filter((p) => p.type !== "literal").map((p) => [p.type, Number(p.value)]));
+  const settings = db.tv.settings, ready = db.sounds.filter((s) => s.tvWav).map((s) => s.id), need = new Set();
+  if (settings.defaultSound === "random" || settings.defaultSound === "custom-random") ready.forEach((id) => need.add(id));
+  else if (typeof settings.defaultSound === "string" && settings.defaultSound.indexOf("custom:") === 0 && ready.includes(settings.defaultSound.slice(7))) need.add(settings.defaultSound.slice(7));
+  db.repSounds.forEach((r) => { if (r.choice.indexOf("custom:") === 0 && ready.includes(r.choice.slice(7))) need.add(r.choice.slice(7)); });
+  return { now: new Date(now).toISOString(), clock: { h: parts.hour || 0, m: parts.minute || 0, s: parts.second || 0 }, volume: TV_VOLUMES[settings.volume] || 70, rows, closes, customSounds: Array.from(need), unreachable: Array.from(new Set([...closing.errors, ...arrival.errors].map((e) => e.locationName))) };
+}
+app.get("/api/tv/feed", tvAuth, async (req, res) => {
+  try { res.set("Cache-Control", "no-store"); res.json(await buildTvFeed(loadDB())); } catch (e) { res.status(500).json({ error: "Couldn't build the feed." }); }
+});
+app.get("/api/tv/sound/:id", tvAuth, (req, res) => {
+  const sound = /^[a-f0-9]{16}$/.test(req.params.id) ? loadDB().sounds.find((s) => s.id === req.params.id && s.tvWav) : null;
+  const file = sound && path.join(SOUNDS_DIR, `${sound.id}.tv.wav`);
+  if (!sound || !fs.existsSync(file)) return res.status(404).json({ error: "Sound not found." });
+  res.set({ "Content-Type": "audio/wav", "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store" });
+  res.send(fs.readFileSync(file));
+});
+
+// ---- the owner's side: status, settings, building the app, turning it off ----
+app.get("/api/tv", requireOwner, (req, res) => {
+  const db = loadDB();
+  res.json({ hasKey: !!db.tv.keyHash, createdAt: db.tv.createdAt, settings: db.tv.settings });
+});
+app.put("/api/tv/settings", requireOwner, (req, res) => {
+  const db = loadDB();
+  const { defaultSound, volume } = req.body || {};
+  const ready = db.sounds.filter((s) => s.tvWav).map((s) => s.id);
+  const okSound = defaultSound === undefined || defaultSound === "random" || defaultSound === "off" || defaultSound === "custom-random" || BUILTIN_SOUND_KEYS.includes(defaultSound) || (typeof defaultSound === "string" && /^custom:[a-f0-9]{16}$/.test(defaultSound) && ready.includes(defaultSound.slice(7)));
+  if (!okSound) return res.status(400).json({ error: "That sound isn't available on the Roku yet." });
+  if (volume !== undefined && !TV_VOLUMES[volume]) return res.status(400).json({ error: "Volume must be low, medium or high." });
+  if (defaultSound !== undefined) db.tv.settings.defaultSound = defaultSound;
+  if (volume !== undefined) db.tv.settings.volume = volume;
+  saveDB(db);
+  res.json({ ok: true, settings: db.tv.settings });
+});
+app.delete("/api/tv/key", requireOwner, (req, res) => {
+  const db = loadDB();
+  db.tv.keyHash = null; db.tv.createdAt = null;
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+// A .zip with no extra libraries (the format is simple enough to write by hand).
+const CRC_TABLE = (() => { const t = []; for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+const crc32 = (buf) => { let c = 0xffffffff; for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+function makeZip(files) {
+  const parts = [], central = []; let offset = 0;
+  files.forEach((f) => {
+    const name = Buffer.from(f.name, "utf8"), raw = f.data, packed = zlib.deflateRawSync(raw), useDeflate = packed.length < raw.length, body = useDeflate ? packed : raw, method = useDeflate ? 8 : 0, crc = crc32(raw);
+    const local = Buffer.alloc(30); local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(0x0800, 6); local.writeUInt16LE(method, 8); local.writeUInt16LE(0, 10); local.writeUInt16LE(0x5a21, 12); local.writeUInt32LE(crc, 14); local.writeUInt32LE(body.length, 18); local.writeUInt32LE(raw.length, 22); local.writeUInt16LE(name.length, 26); local.writeUInt16LE(0, 28);
+    parts.push(local, name, body);
+    const c = Buffer.alloc(46); c.writeUInt32LE(0x02014b50, 0); c.writeUInt16LE(20, 4); c.writeUInt16LE(20, 6); c.writeUInt16LE(0x0800, 8); c.writeUInt16LE(method, 10); c.writeUInt16LE(0, 12); c.writeUInt16LE(0x5a21, 14); c.writeUInt32LE(crc, 16); c.writeUInt32LE(body.length, 20); c.writeUInt32LE(raw.length, 24); c.writeUInt16LE(name.length, 28); c.writeUInt32LE(offset, 42);
+    central.push(c, name);
+    offset += 30 + name.length + body.length;
+  });
+  const dir = Buffer.concat(central), end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(files.length, 8); end.writeUInt16LE(files.length, 10); end.writeUInt32LE(dir.length, 12); end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...parts, dir, end]);
+}
+function rokuFiles(dir, prefix) {
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    if (e.name.startsWith(".") || e.name === "bsconfig.json" || e.name === "config.json") return [];
+    return e.isDirectory() ? rokuFiles(path.join(dir, e.name), prefix + e.name + "/") : [{ name: prefix + e.name, data: fs.readFileSync(path.join(dir, e.name)) }];
+  });
+}
+// Builds the app with a BRAND NEW key inside (any app made before this stops working, which is also how an old copy is cancelled).
+app.post("/api/tv/package", requireOwner, (req, res) => {
+  const db = loadDB();
+  const key = crypto.randomBytes(24).toString("hex");
+  const proto = String(req.headers["x-forwarded-proto"] || req.protocol || "https").split(",")[0].trim(), host = req.get("host");
+  const config = Buffer.from(JSON.stringify({ server: `${proto}://${host}`, key }, null, 2));
+  const files = rokuFiles(ROKU_DIR, "");
+  files.sort((x, y) => (x.name === "manifest" ? -1 : y.name === "manifest" ? 1 : x.name < y.name ? -1 : 1));
+  files.push({ name: "config.json", data: config });
+  db.tv.keyHash = sha256(key); db.tv.createdAt = new Date().toISOString();
+  saveDB(db);
+  res.set({ "Content-Type": "application/zip", "Content-Disposition": 'attachment; filename="SBN-Leaderboard-Roku.zip"', "Cache-Control": "no-store" });
+  res.send(makeZip(files));
+});
+
+// The owner's own sounds, as a Roku-friendly copy: a 16-bit mono WAV. The browser makes it (it can read any audio format and match the loudness)
+// and sends it here; the original upload is left alone.
+function checkTvWav(b) {
+  if (!Buffer.isBuffer(b) || b.length < 44 || b.toString("latin1", 0, 4) !== "RIFF" || b.toString("latin1", 8, 12) !== "WAVE") return { error: "That isn't a WAV file." };
+  let pos = 12, fmt = null, dataLen = null;
+  while (pos + 8 <= b.length) {
+    const id = b.toString("latin1", pos, pos + 4), len = b.readUInt32LE(pos + 4);
+    if (id === "fmt " && pos + 8 + 16 <= b.length) fmt = { format: b.readUInt16LE(pos + 8), channels: b.readUInt16LE(pos + 10), rate: b.readUInt32LE(pos + 12), bits: b.readUInt16LE(pos + 22) };
+    if (id === "data") { dataLen = Math.min(len, b.length - pos - 8); break; }
+    pos += 8 + len + (len % 2);
+  }
+  if (!fmt || dataLen === null) return { error: "That WAV file is incomplete." };
+  if (fmt.format !== 1 || fmt.channels !== 1 || fmt.bits !== 16 || fmt.rate < 8000 || fmt.rate > 48000) return { error: "The Roku copy must be a 16-bit mono WAV." };
+  const seconds = dataLen / (fmt.rate * 2);
+  if (seconds < 0.05) return { error: "That sound is too short." };
+  if (seconds > 13) return { error: "That sound is too long for the Roku (the limit is about 12 seconds)." };
+  return { seconds };
+}
+app.put("/api/sounds/:id/tv-wav", requireOwner, express.raw({ type: () => true, limit: MAX_SOUND_BYTES }), (req, res) => {
+  if (!/^[a-f0-9]{16}$/.test(req.params.id)) return res.status(404).json({ error: "Sound not found." });
+  const db = loadDB();
+  const sound = db.sounds.find((s) => s.id === req.params.id);
+  if (!sound) return res.status(404).json({ error: "Sound not found." });
+  const check = checkTvWav(req.body);
+  if (check.error) return res.status(400).json({ error: check.error });
+  try { fs.mkdirSync(SOUNDS_DIR, { recursive: true }); fs.writeFileSync(path.join(SOUNDS_DIR, `${sound.id}.tv.wav`), req.body); } catch (e) { return res.status(500).json({ error: "Couldn't save that on the server." }); }
+  sound.tvWav = true;
+  saveDB(db);
+  res.json({ ok: true, seconds: Math.round(check.seconds * 100) / 100 });
+});
+
 // A file over the size limit gets a plain-English answer instead of an error page.
 app.use((err, req, res, next) => {
-  if (err && err.type === "entity.too.large" && req.path === "/api/sounds") return res.status(413).json({ error: "That file is too big. Keep it under 3 MB." });
+  if (err && err.type === "entity.too.large" && req.path.indexOf("/api/sounds") === 0) return res.status(413).json({ error: "That file is too big. Keep it under 3 MB." });
   next(err);
 });
 
