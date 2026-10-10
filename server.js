@@ -34,6 +34,9 @@ function loadDB() {
   if (!db.repSounds) db.repSounds = [];
   if (!db.tv) db.tv = { keyHash: null, createdAt: null, settings: { defaultSound: "random", volume: "medium" } };
   if (!db.tv.settings) db.tv.settings = { defaultSound: "random", volume: "medium" };
+  if (!db.tv.settings.soundMethod) db.tv.settings.soundMethod = "auto";
+  if (!db.tv.reports) db.tv.reports = [];
+  if (!db.tv.test) db.tv.test = { seq: 0, sound: null };
   if (db.ownerPasswordHash === undefined) db.ownerPasswordHash = OWNER_PASSWORD_HASH_ENV || null;
   return db;
 }
@@ -503,6 +506,9 @@ app.put("/api/rep-sounds", requireOwner, (req, res) => {
 const zlib = require("zlib");
 const ROKU_DIR = path.join(__dirname, "roku");
 const TV_VOLUMES = { low: 40, medium: 70, high: 100 };
+const TV_SOUND_METHODS = ["auto", "effects", "player"];   // how the Roku plays a sound: try both ways (auto), or only the sound-effects player, or only the audio player
+let tvLastSeenAt = 0;                                      // when the TV last asked for the feed (kept in memory only: it is just "is the TV alive right now")
+let tvReportTimes = [];
 const sha256 = (x) => crypto.createHash("sha256").update(String(x)).digest("hex");
 const hashInt = (x) => parseInt(sha256(x).slice(0, 8), 16);
 
@@ -556,9 +562,10 @@ async function buildTvFeed(db) {
   if (settings.defaultSound === "random" || settings.defaultSound === "custom-random") ready.forEach((id) => need.add(id));
   else if (typeof settings.defaultSound === "string" && settings.defaultSound.indexOf("custom:") === 0 && ready.includes(settings.defaultSound.slice(7))) need.add(settings.defaultSound.slice(7));
   db.repSounds.forEach((r) => { if (r.choice.indexOf("custom:") === 0 && ready.includes(r.choice.slice(7))) need.add(r.choice.slice(7)); });
-  return { now: new Date(now).toISOString(), clock: { h: parts.hour || 0, m: parts.minute || 0, s: parts.second || 0 }, volume: TV_VOLUMES[settings.volume] || 70, rows, closes, customSounds: Array.from(need), unreachable: Array.from(new Set([...closing.errors, ...arrival.errors].map((e) => e.locationName))) };
+  return { now: new Date(now).toISOString(), clock: { h: parts.hour || 0, m: parts.minute || 0, s: parts.second || 0 }, volume: TV_VOLUMES[settings.volume] || 70, soundMethod: settings.soundMethod || "auto", test: { seq: db.tv.test.seq || 0, sound: db.tv.test.sound }, rows, closes, customSounds: Array.from(need), unreachable: Array.from(new Set([...closing.errors, ...arrival.errors].map((e) => e.locationName))) };
 }
 app.get("/api/tv/feed", tvAuth, async (req, res) => {
+  tvLastSeenAt = Date.now();
   try { res.set("Cache-Control", "no-store"); res.json(await buildTvFeed(loadDB())); } catch (e) { res.status(500).json({ error: "Couldn't build the feed." }); }
 });
 app.get("/api/tv/sound/:id", tvAuth, (req, res) => {
@@ -572,19 +579,50 @@ app.get("/api/tv/sound/:id", tvAuth, (req, res) => {
 // ---- the owner's side: status, settings, building the app, turning it off ----
 app.get("/api/tv", requireOwner, (req, res) => {
   const db = loadDB();
-  res.json({ hasKey: !!db.tv.keyHash, createdAt: db.tv.createdAt, settings: db.tv.settings });
+  res.json({ hasKey: !!db.tv.keyHash, createdAt: db.tv.createdAt, settings: db.tv.settings, lastSeenAt: tvLastSeenAt ? new Date(tvLastSeenAt).toISOString() : null, reports: db.tv.reports.slice(-12).reverse() });
 });
 app.put("/api/tv/settings", requireOwner, (req, res) => {
   const db = loadDB();
-  const { defaultSound, volume } = req.body || {};
+  const { defaultSound, volume, soundMethod } = req.body || {};
   const ready = db.sounds.filter((s) => s.tvWav).map((s) => s.id);
   const okSound = defaultSound === undefined || defaultSound === "random" || defaultSound === "off" || defaultSound === "custom-random" || BUILTIN_SOUND_KEYS.includes(defaultSound) || (typeof defaultSound === "string" && /^custom:[a-f0-9]{16}$/.test(defaultSound) && ready.includes(defaultSound.slice(7)));
   if (!okSound) return res.status(400).json({ error: "That sound isn't available on the Roku yet." });
   if (volume !== undefined && !TV_VOLUMES[volume]) return res.status(400).json({ error: "Volume must be low, medium or high." });
+  if (soundMethod !== undefined && !TV_SOUND_METHODS.includes(soundMethod)) return res.status(400).json({ error: "Unknown way of playing sounds." });
+  if (soundMethod !== undefined) db.tv.settings.soundMethod = soundMethod;
   if (defaultSound !== undefined) db.tv.settings.defaultSound = defaultSound;
   if (volume !== undefined) db.tv.settings.volume = volume;
   saveDB(db);
   res.json({ ok: true, settings: db.tv.settings });
+});
+
+// The Roku tells the tracker what it is doing (its model, which sound it tried and whether that worked), so a silent TV can be diagnosed from here
+// instead of guessed at. Only the last 40 are kept, and anything odd in the text is stripped.
+app.post("/api/tv/report", tvAuth, (req, res) => {
+  const b = req.body || {};
+  const clean = (x, n) => String(x === undefined || x === null ? "" : x).replace(/[\u0000-\u001f\u007f<>]/g, " ").replace(/\s+/g, " ").trim().slice(0, n);
+  const event = clean(b.event, 40), detail = clean(b.detail, 300);
+  if (!event) return res.status(400).json({ error: "Missing event." });
+  const now = Date.now();
+  tvReportTimes = tvReportTimes.filter((t) => now - t < 60000);
+  if (tvReportTimes.length >= 40) return res.status(429).json({ error: "Too many reports." });
+  tvReportTimes.push(now);
+  const db = loadDB();
+  db.tv.reports.push({ at: new Date(now).toISOString(), event, detail });
+  if (db.tv.reports.length > 40) db.tv.reports = db.tv.reports.slice(-40);
+  saveDB(db);
+  res.json({ ok: true });
+});
+// "Play a test sound on the TV": the TV notices on its next refresh and plays it, so the owner can test without waiting for a deal.
+app.post("/api/tv/test-sound", requireOwner, (req, res) => {
+  const db = loadDB();
+  const key = (req.body && req.body.key) || "chaching";
+  const readyCustom = db.sounds.filter((x) => x.tvWav).map((x) => x.id);
+  const isCustom = typeof key === "string" && /^custom:[a-f0-9]{16}$/.test(key) && readyCustom.includes(key.slice(7));
+  if (!(typeof key === "string" && BUILTIN_SOUND_KEYS.includes(key)) && !isCustom) return res.status(400).json({ error: "That sound isn't available on the Roku." });
+  db.tv.test = { seq: (db.tv.test.seq || 0) + 1, sound: isCustom ? { kind: "custom", id: key.slice(7), fallback: "chaching" } : { kind: "builtin", key } };
+  saveDB(db);
+  res.json({ ok: true, seq: db.tv.test.seq });
 });
 app.delete("/api/tv/key", requireOwner, (req, res) => {
   const db = loadDB();
