@@ -233,6 +233,50 @@ async function renderSettings(content) {
   ]));
   await loadGoals();
 
+  // ---- Rep sounds ----
+  content.appendChild(el("div", { class: "muted", style: "margin:24px 0 12px", text: "REP SOUNDS" }));
+  const repSoundsBox = el("div", { class: "card" });
+  content.appendChild(repSoundsBox);
+  async function loadRepSounds() {
+    let reps = [], assigned = [], sounds = [];
+    try {
+      const r = await api("/api/combined/salesreps"), seen = new Map();
+      r.locations.forEach((l) => (l.salesReps || []).forEach((s) => { const k = repKeyOf(s.name); if (k && !seen.has(k)) seen.set(k, String(s.name).trim().replace(/\s+/g, " ")); }));   // the same person at two locations is one rep
+      reps = Array.from(seen.values()).sort((x, y) => x.localeCompare(y));
+    } catch (e) { /* locations unreachable: the list just stays empty */ }
+    try { assigned = await api("/api/rep-sounds"); } catch (e) { /* none yet */ }
+    try { sounds = await api("/api/sounds"); } catch (e) { /* none yet */ }
+    const choiceOf = (name) => { const a = assigned.find((x) => x.key === repKeyOf(name)); if (!a) return "default"; if (DEAL_SOUNDS[a.choice]) return a.choice; return sounds.some((s) => "custom:" + s.id === a.choice) ? a.choice : "default"; };
+    while (repSoundsBox.firstChild) repSoundsBox.removeChild(repSoundsBox.firstChild);
+    repSoundsBox.appendChild(el("div", { class: "muted", style: "font-size:12.5px;margin-bottom:12px", text: "When a rep closes a deal, their sound plays on the leaderboard instead of the usual one. Reps left on Default use whatever each screen is set to. A screen set to Off stays silent." }));
+    if (reps.length === 0) repSoundsBox.appendChild(el("div", { class: "muted", text: "No reps found yet. They show up here once your locations are connected and have sales reps." }));
+    reps.forEach((name) => {
+      const sel = el("select", { style: "flex:1;min-width:150px" });
+      sel.appendChild(el("option", { value: "default", text: "Default (the screen's choice)" }));
+      Object.entries(DEAL_SOUNDS).forEach(([k, d]) => sel.appendChild(el("option", { value: k, text: d.name })));
+      if (sounds.length) { const g = document.createElement("optgroup"); g.label = "My sounds"; sounds.forEach((s) => g.appendChild(el("option", { value: "custom:" + s.id, text: "🎵 " + s.name }))); sel.appendChild(g); }
+      sel.value = choiceOf(name);
+      let saved = sel.value;
+      const status = el("span", { style: "font-size:11.5px;min-width:64px;text-align:right" });
+      const play = el("button", { class: "ghost", style: "padding:2px 10px", title: "Hear it", text: "▶", onclick: () => wakeDealAudio(() => previewRepSound(sel.value)) });
+      const showPlay = () => { play.style.visibility = sel.value === "default" ? "hidden" : "visible"; };
+      showPlay();
+      sel.addEventListener("change", async () => {
+        try {
+          await api("/api/rep-sounds", { method: "PUT", body: JSON.stringify({ name, choice: sel.value }) });
+          saved = sel.value; status.textContent = "Saved ✓"; status.style.color = "var(--green)"; showPlay();
+          if (sel.value !== "default") wakeDealAudio(() => previewRepSound(sel.value));   // so you hear what you just chose
+        } catch (e) { sel.value = saved; showPlay(); status.textContent = "Not saved"; status.style.color = "var(--red)"; }
+      });
+      repSoundsBox.appendChild(el("div", { style: "margin-bottom:12px" }, [
+        el("div", { style: "font-size:13px;margin-bottom:4px", text: name }),
+        el("div", { class: "row", style: "gap:6px;align-items:center" }, [sel, play, status]),
+      ]));
+    });
+    if (reps.length && sounds.length === 0) repSoundsBox.appendChild(el("div", { class: "muted", style: "font-size:11.5px", text: "Want your own sounds in this list? Add them from the 🔊 panel on the Leaderboard (bottom-right)." }));
+  }
+  loadRepSounds();
+
   // ---- Password ----
   content.appendChild(el("div", { class: "muted", style: "margin:24px 0 12px", text: "PASSWORD" }));
   const pwWarn = el("div", { style: "display:none;font-size:12.5px;color:var(--amber);border:0.5px solid var(--amber);border-radius:8px;padding:8px 10px;margin-bottom:12px", text: "⚠ The RESET_OWNER_PASSWORD variable is still set in Railway. While it's there, it puts that password back every time this tool restarts, undoing what you set here. Delete it in Railway → Variables." });
@@ -1184,6 +1228,28 @@ function customSoundLevel(channels) {
 // Browsers refuse to play sound until the person has tapped or clicked the page once, so the sound system is only woken up by a tap.
 let dealAudio = null;
 const dealCustom = { list: [], buffers: new Map(), pending: new Map(), current: null };   // the owner's own sounds: the list, the ones ready to play, the ones being fetched, the one playing now
+const dealRepSounds = new Map();                 // each rep's own sound: rep name (lowercase, single spaces) -> "chaching" ... or "custom:<id>"; reps not in here use the screen's choice
+const repKeyOf = (name) => String(name || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+function applyRepSoundList(list) { dealRepSounds.clear(); list.forEach((r) => dealRepSounds.set(r.key, r.choice)); }
+// The sound a rep is set to, or null (use the screen's choice) if they have none, or theirs has since been deleted.
+function repChoiceFor(repName) {
+  const c = dealRepSounds.get(repKeyOf(repName));
+  if (!c) return null;
+  if (DEAL_SOUNDS[c]) return c;
+  return c.indexOf("custom:") === 0 && dealCustom.list.some((s) => "custom:" + s.id === c) ? c : null;
+}
+// Wakes the sound system (this needs a tap) and then runs `then`. Used by Settings, outside the leaderboard.
+function wakeDealAudio(then) {
+  const ctx = dealAudioContext();
+  if (!ctx) return;
+  const done = () => { if (ctx.state === "running" && then) then(); };
+  if (ctx.state === "running") { done(); return; }
+  Promise.resolve(ctx.resume()).then(done, done);
+}
+async function previewRepSound(choice) {
+  if (choice.indexOf("custom:") === 0) await loadCustomBuffer(choice.slice(7));
+  playDealSound(choice, loadDealSoundPrefs().volume);
+}
 function dealAudioContext() {
   const AC = window.AudioContext || window.webkitAudioContext;
   if (!AC) return null;
@@ -1379,7 +1445,8 @@ async function renderLeaderboard(app) {
   function prefetchCustom() {
     if (!dealAudio) return;
     const c = soundPrefs.choice;
-    const ids = c.indexOf("custom:") === 0 ? [c.slice(7)] : (c === "random" || c === "custom-random") ? dealCustom.list.map((s) => s.id) : [];
+    const ids = new Set(c.indexOf("custom:") === 0 ? [c.slice(7)] : (c === "random" || c === "custom-random") ? dealCustom.list.map((s) => s.id) : []);
+    dealRepSounds.forEach((choice) => { if (choice.indexOf("custom:") === 0) ids.add(choice.slice(7)); });   // and the clips any rep is set to
     ids.forEach((id) => loadCustomBuffer(id));
   }
   // Wakes the sound up (needs a tap), then runs `then` once it is awake.
@@ -1422,6 +1489,10 @@ async function renderLeaderboard(app) {
   async function refreshCustomSounds() {
     try { applyCustomList(await api("/api/sounds")); } catch (e) { /* offline for a moment: keep what we have */ }
   }
+  async function refreshRepSounds() {
+    try { applyRepSoundList(await api("/api/rep-sounds")); prefetchCustom(); } catch (e) { /* offline for a moment: keep what we have */ }
+  }
+  const refreshAllSounds = () => refreshCustomSounds().then(refreshRepSounds);   // the list of clips first, so a rep's choice can be checked against it
   async function addCustomSound(file) {
     const bad = "var(--red)";
     if (!file) return;
@@ -1474,11 +1545,13 @@ async function renderLeaderboard(app) {
     unlockEvents.forEach((e) => document.addEventListener(e, unlockSound, true));
     wrap.appendChild(el("div", { style: "position:fixed;right:16px;bottom:16px;z-index:25;display:flex;flex-direction:column;align-items:flex-end;gap:8px" }, [soundPanel, soundHint, soundBtn]));
     refreshSoundUi();
-    refreshCustomSounds();
+    refreshAllSounds();
   }
-  function playBannerSound() {
+  // The sound for a deal: the rep's own if they have one, otherwise this screen's choice. A screen set to Off stays silent for everyone.
+  function playBannerSound(repName) {
     if (!soundSupported || soundPrefs.choice === "off") return;
-    if (!playDealSound(soundPrefs.choice, soundPrefs.volume)) refreshSoundUi();   // not allowed to play yet: the "tap once" note stays up
+    const choice = repChoiceFor(repName) || soundPrefs.choice;
+    if (!playDealSound(choice, soundPrefs.volume)) refreshSoundUi();   // not allowed to play yet: the "tap once" note stays up
   }
 
   function tickClock() {
@@ -1509,7 +1582,7 @@ async function renderLeaderboard(app) {
       el("div", { style: "font-size:18px;font-weight:400;opacity:0.95", text: [c.baseService || c.car, c.locationName].filter(Boolean).join(" · ") + (more ? `   (+${more} more)` : "") }),
     ]);
     bannerLayer.appendChild(node);
-    playBannerSound();                 // the funny sound, once for each banner that pops up
+    playBannerSound(c.repName);        // the funny sound, once for each banner that pops up (the rep's own if they have one)
     setTimeout(() => { node.remove(); bannerBusy = false; showNextBanner(); }, window.DEAL_BANNER_MS || 9000);
   }
   function announceNewCloses(closingData) {
@@ -1527,7 +1600,7 @@ async function renderLeaderboard(app) {
 
   let latestLeaderboardRequestId = 0;
   async function load() {
-    if (soundSupported) refreshCustomSounds();     // sounds added from another device show up here within a refresh or two
+    if (soundSupported) refreshAllSounds();        // sounds (and which rep has which) changed from another device show up here within a refresh or two
     const thisRequestId = ++latestLeaderboardRequestId;
     let closingData, arrivalData;
     try {
