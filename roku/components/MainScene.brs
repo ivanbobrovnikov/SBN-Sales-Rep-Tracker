@@ -8,11 +8,16 @@ sub init()
     m.emptyLabel = m.top.findNode("empty")
     m.clockLabel = m.top.findNode("clock")
     m.banner = m.top.findNode("banner")
-    m.feedTask = m.top.findNode("feedTask")
-    m.dlTask = m.top.findNode("dlTask")
+    m.feedTask = invalid     ' workers are created fresh for every job (see runFeed / startDownloads / sendNextReport)
+    m.dlTask = invalid
+    m.reportTask = invalid
     m.pollTimer = m.top.findNode("pollTimer")
     m.clockTimer = m.top.findNode("clockTimer")
     m.bannerTimer = m.top.findNode("bannerTimer")
+    m.diagLabel = m.top.findNode("diag")
+    m.diagTimer = m.top.findNode("diagTimer")
+    m.soundTimer = m.top.findNode("soundTimer")
+    m.audio = m.top.findNode("audioPlayer")
     m.state = tv_newState()
     m.have = {}
     m.wanted = []
@@ -21,15 +26,27 @@ sub init()
     m.queue = []
     m.bannerBusy = false
     m.polling = false
+    m.pollStarted = 0
+    m.dlStarted = 0
+    m.reportStarted = 0
     m.clockBase = invalid
     m.clockAt = 0
     m.volume = 70
     m.player = invalid
-    m.feedTask.observeField("result", "onFeed")
-    m.dlTask.observeField("result", "onDownloaded")
+    m.soundMethod = "auto"
+    m.testSeq = invalid
+    m.sndPath = ""
+    m.sndLabel = ""
+    m.sndAttempts = []
+    m.sndTry = 0
+    m.reportQueue = []
+    m.reporting = false
     m.pollTimer.observeField("fire", "pollNow")
     m.clockTimer.observeField("fire", "tickClock")
     m.bannerTimer.observeField("fire", "bannerDone")
+    m.diagTimer.observeField("fire", "clearDiag")
+    m.soundTimer.observeField("fire", "onSoundTimeout")
+    m.audio.observeField("state", "onAudioState")
     if m.cfg = invalid or m.cfg.server = invalid or m.cfg.key = invalid
         m.statusLabel.text = "This app is not set up. Download it again from the tracker's Settings."
         print "TV> no config"
@@ -40,6 +57,11 @@ sub init()
     if m.cfg.bannerSeconds <> invalid then m.bannerTimer.duration = m.cfg.bannerSeconds ' optional: tests don't wait the normal 9 seconds
     m.pollTimer.control = "start"
     m.clockTimer.control = "start"
+    di = CreateObject("roDeviceInfo")
+    osv = di.GetOSVersion()
+    osText = ""
+    if osv <> invalid then osText = tv_text(osv.major) + "." + tv_text(osv.minor) + " build " + tv_text(osv.build)
+    report("started", "SBN Leaderboard 1.1 on " + tv_text(di.GetModelDisplayName()) + " (" + tv_text(di.GetModel()) + ") Roku OS " + osText)
     pollNow()
 end sub
 
@@ -49,18 +71,34 @@ function loadConfig() as dynamic
     return ParseJson(text)
 end function
 
+' A Roku worker (Task) that has just finished can still count as "running" for a moment, and a request to run it again in that moment is silently
+' ignored, so a worker is never reused: every refresh, report and download gets a brand new one. Anything that doesn't come back within 30 seconds
+' is given up on and replaced.
 sub pollNow()
     if m.cfg = invalid then return
-    if m.polling then return
+    if m.polling
+        if Uptime(0) - m.pollStarted < 30
+            print "TV> poll skipped (waiting for the last one)"
+            return
+        end if
+        print "TV> poll took too long, starting a fresh one"
+    end if
     m.polling = true
-    m.feedTask.url = m.cfg.server + "/api/tv/feed"
-    m.feedTask.key = m.cfg.key
-    m.feedTask.control = "RUN"
+    m.pollStarted = Uptime(0)
+    task = CreateObject("roSGNode", "FeedTask")
+    task.observeField("result", "onFeed")
+    task.url = m.cfg.server + "/api/tv/feed"
+    task.key = m.cfg.key
+    m.feedTask = task
+    task.control = "RUN"
 end sub
 
-sub onFeed()
+sub onFeed(event as object)
+    task = event.getRoSGNode()
+    if m.feedTask = invalid then return
+    if not task.isSameNode(m.feedTask) then return      ' a late answer from a refresh we already gave up on
     m.polling = false
-    r = m.feedTask.result
+    r = event.getData()
     if r = invalid then return
     if r.ok
         m.statusLabel.text = ""
@@ -81,6 +119,16 @@ sub applyFeed(feed as object)
         tickClock()
     end if
     m.volume = tv_volume(feed.volume)
+    if feed.soundMethod <> invalid then m.soundMethod = feed.soundMethod
+    if feed.test <> invalid
+        if m.testSeq = invalid
+            m.testSeq = feed.test.seq
+        else if feed.test.seq <> m.testSeq
+            m.testSeq = feed.test.seq
+            m.queue.Push({ isTest: true, sound: feed.test.sound })
+            print "TV> test sound requested"
+        end if
+    end if
     if feed.unreachable <> invalid and feed.unreachable.Count() > 0
         names = ""
         for each n in feed.unreachable
@@ -208,6 +256,19 @@ sub showNextBanner()
     m.bannerBusy = true
     c = m.queue.Shift()
     more = m.queue.Count()
+    if c.isTest = true
+        m.top.findNode("bannerBg").color = "0x2F6FEDFF"
+        m.top.findNode("bannerTop").text = "SOUND TEST"
+        m.top.findNode("bannerMain").text = "Playing a test sound..."
+        m.top.findNode("bannerSub").text = "If you hear nothing, check the TV volume, then look at ROKU TV in the tracker's Settings"
+        m.banner.visible = true
+        print "TV> banner SOUND TEST"
+        playSound(c.sound, "test")
+        m.bannerTimer.control = "start"
+        return
+    end if
+    m.top.findNode("bannerBg").color = "0x1F9D55FF"
+    m.top.findNode("bannerTop").text = "DEAL CLOSED"
     m.top.findNode("bannerMain").text = c.repName + " just closed " + tv_money(c.priceCents)
     detail = c.service
     if detail = invalid then detail = ""
@@ -218,7 +279,7 @@ sub showNextBanner()
     m.top.findNode("bannerSub").text = detail
     m.banner.visible = true
     print "TV> banner " + c.repName + " " + tv_money(c.priceCents)
-    playSound(c.sound)
+    playSound(c.sound, c.repName)
     m.bannerTimer.control = "start"
 end sub
 
@@ -228,36 +289,152 @@ sub bannerDone()
     showNextBanner()
 end sub
 
-sub playSound(sound as dynamic)
+sub playSound(sound as dynamic, label as string)
     path = tv_soundPath(sound, m.have)
     if path = ""
         print "TV> silent"
         return
     end if
-    res = CreateObject("roAudioResource", path)
-    if res <> invalid
-        m.player = res
-        res.Trigger(m.volume)
-        print "TV> play " + path + " volume=" + m.volume.ToStr()
-    else
-        print "TV> could not open " + path
+    m.sndPath = path
+    m.sndLabel = label
+    m.sndAttempts = tv_attempts(m.soundMethod)
+    m.sndTry = 0
+    nextAttempt()
+end sub
+
+' Tries the ways of playing a sound one after another until one works. Whatever happens is reported to the tracker so it can be seen from there.
+sub nextAttempt()
+    m.soundTimer.control = "stop"
+    if m.sndTry >= m.sndAttempts.Count()
+        showDiag("Could not play the sound for " + m.sndLabel)
+        report("sound_failed", m.sndPath + " (every way failed)")
+        print "TV> sound failed " + m.sndPath
+        return
     end if
+    a = m.sndAttempts[m.sndTry]
+    m.sndTry = m.sndTry + 1
+    if a.method = "effects"
+        res = CreateObject("roAudioResource", m.sndPath)
+        if res = invalid
+            print "TV> could not open(effects) " + m.sndPath
+            report("sound_error", "sound-effects player could not open " + m.sndPath)
+            nextAttempt()
+            return
+        end if
+        ok = res.Trigger(m.volume)
+        m.player = res
+        print "TV> play(effects) " + m.sndPath + " volume=" + m.volume.ToStr()
+        if ok = invalid or ok
+            showDiag("Played " + m.sndLabel + " (sound-effects player)")
+            report("sound_ok", m.sndPath + " via the sound-effects player, volume " + m.volume.ToStr())
+        else
+            report("sound_error", "sound-effects player would not start " + m.sndPath)
+            nextAttempt()
+        end if
+    else
+        content = CreateObject("roSGNode", "ContentNode")
+        content.url = m.sndPath
+        if a.fmt <> "" then content.streamFormat = a.fmt
+        m.audio.control = "stop"
+        m.audio.content = content
+        m.audio.control = "play"
+        m.soundTimer.control = "start"
+        print "TV> play(player) " + m.sndPath + " format=[" + a.fmt + "]"
+    end if
+end sub
+
+sub onAudioState()
+    st = m.audio.state
+    print "TV> audio state=" + st
+    if st = "playing"
+        m.soundTimer.control = "stop"
+        showDiag("Played " + m.sndLabel + " (audio player)")
+        report("sound_ok", m.sndPath + " via the audio player")
+    else if st = "error"
+        m.soundTimer.control = "stop"
+        report("sound_error", "audio player error on " + m.sndPath + ": " + tv_text(m.audio.errorMsg) + " code " + tv_text(m.audio.errorCode))
+        nextAttempt()
+    end if
+end sub
+
+sub onSoundTimeout()
+    print "TV> audio player never started"
+    report("sound_timeout", "audio player never started " + m.sndPath)
+    m.audio.control = "stop"
+    nextAttempt()
+end sub
+
+sub showDiag(text as string)
+    m.diagLabel.text = text
+    m.diagTimer.control = "start"
+end sub
+
+sub clearDiag()
+    m.diagLabel.text = ""
+end sub
+
+' ---- reports to the tracker, one at a time ----
+sub report(event as string, detail as string)
+    if m.cfg = invalid then return
+    if m.reportQueue.Count() > 20 then m.reportQueue.Shift()
+    m.reportQueue.Push({ event: event, detail: detail })
+    print "TV> report queued: " + event
+    sendNextReport()
+end sub
+
+sub sendNextReport()
+    if m.reporting
+        if Uptime(0) - m.reportStarted < 30 then return
+        print "TV> a report took too long, moving on"
+        m.reporting = false
+    end if
+    if m.reportQueue.Count() = 0 then return
+    r = m.reportQueue.Shift()
+    m.reporting = true
+    m.reportStarted = Uptime(0)
+    task = CreateObject("roSGNode", "ReportTask")
+    task.observeField("result", "onReported")
+    task.url = m.cfg.server + "/api/tv/report"
+    task.key = m.cfg.key
+    task.body = FormatJson(r)
+    m.reportTask = task
+    task.control = "RUN"
+end sub
+
+sub onReported(event as object)
+    task = event.getRoSGNode()
+    if m.reportTask = invalid then return
+    if not task.isSameNode(m.reportTask) then return
+    m.reporting = false
+    print "TV> report sent"
+    sendNextReport()
 end sub
 
 ' ---- the owner's own sounds: fetched one at a time and kept until the app closes ----
 sub startDownloads()
-    if m.downloading then return
+    if m.downloading
+        if Uptime(0) - m.dlStarted < 60 then return
+        print "TV> sound download took too long, moving on"
+        m.downloading = false
+    end if
     if m.wanted.Count() = 0 then return
     m.dlId = m.wanted.Shift()
     m.downloading = true
-    m.dlTask.url = m.cfg.server + "/api/tv/sound/" + m.dlId
-    m.dlTask.key = m.cfg.key
-    m.dlTask.path = "tmp:/tv_" + m.dlId + ".wav"
-    m.dlTask.control = "RUN"
+    m.dlStarted = Uptime(0)
+    task = CreateObject("roSGNode", "DownloadTask")
+    task.observeField("result", "onDownloaded")
+    task.url = m.cfg.server + "/api/tv/sound/" + m.dlId
+    task.key = m.cfg.key
+    task.path = "tmp:/tv_" + m.dlId + ".wav"
+    m.dlTask = task
+    task.control = "RUN"
 end sub
 
-sub onDownloaded()
-    r = m.dlTask.result
+sub onDownloaded(event as object)
+    task = event.getRoSGNode()
+    if m.dlTask = invalid then return
+    if not task.isSameNode(m.dlTask) then return
+    r = event.getData()
     m.downloading = false
     if r <> invalid and r.ok
         m.have[m.dlId] = true
