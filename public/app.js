@@ -359,6 +359,13 @@ async function renderSettings(content) {
     rokuBox.appendChild(el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.04em;margin:14px 0 4px", text: "HOW THE TV PLAYS SOUNDS" }));
     rokuBox.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: "If you can't hear anything, press Play a test sound on the TV, then try the other choices here. The volume above only applies to the sound-effects player." }));
     rokuBox.appendChild(method);
+    // confetti is the one effect that could look choppy on a basic Roku, so it has an off switch
+    const confetti = el("select", { style: "width:100%;margin-bottom:8px" }, [opt("on", "Confetti: on"), opt("off", "Confetti: off")]);
+    confetti.value = tv.settings.confetti === false ? "off" : "on";
+    confetti.addEventListener("change", () => saveSetting({ confetti: confetti.value === "on" }));
+    rokuBox.appendChild(el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.04em;margin:14px 0 4px", text: "CONFETTI" }));
+    rokuBox.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: "Confetti falls across the TV with every Deal closed banner. If your TV ever looks choppy while it falls, turn it off." }));
+    rokuBox.appendChild(confetti);
 
     // the owner's own sounds need a Roku copy; this makes it for the ones uploaded before the Roku app existed
     if (sounds.length) {
