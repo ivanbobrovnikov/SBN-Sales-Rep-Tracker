@@ -277,6 +277,93 @@ async function renderSettings(content) {
   }
   loadRepSounds();
 
+  // ---- Roku TV ----
+  content.appendChild(el("div", { class: "muted", style: "margin:24px 0 12px", text: "ROKU TV" }));
+  const rokuBox = el("div", { class: "card" });
+  content.appendChild(rokuBox);
+  // `msg` is a message to show AFTER the box has been redrawn (a message written before the redraw would land on the old, discarded copy)
+  async function loadRoku(msg) {
+    let tv, sounds = [];
+    try { tv = await api("/api/tv"); } catch (e) { rokuBox.textContent = "Couldn't load the Roku settings."; return; }
+    try { sounds = await api("/api/sounds"); } catch (e) { /* none yet */ }
+    while (rokuBox.firstChild) rokuBox.removeChild(rokuBox.firstChild);
+    const note = el("div", { style: "font-size:12.5px;margin-top:8px;min-height:16px", class: "muted" });
+    const say = (text, color) => { note.textContent = text; note.style.color = color || "var(--sub)"; };
+    rokuBox.appendChild(el("div", { class: "muted", style: "font-size:12.5px;margin-bottom:12px", text: "Show the leaderboard on a Roku TV with its own small app: the same ranking, the same Deal closed banners and the same sounds. After the one-time setup below it needs no computer, phone or cable." }));
+    rokuBox.appendChild(el("div", { style: "font-size:13px;margin-bottom:10px", text: tv.hasKey ? `A Roku app is set up (made ${formatDateTime(tv.createdAt)}). Downloading a new one replaces it, so the old one stops working.` : "No Roku app is set up yet." }));
+    rokuBox.appendChild(el("button", { class: "primary", text: "Download the Roku app", onclick: async () => {
+      if (tv.hasKey && !confirm("This makes a NEW app and cancels the old one: the app on your Roku stops working until you install the new one. Continue?")) return;
+      say("Building the app...");
+      try {
+        const res = await fetch("/api/tv/package", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}", credentials: "same-origin" });
+        if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.error || "Couldn't build the app."); }
+        const url = URL.createObjectURL(await res.blob());
+        const link = document.createElement("a"); link.href = url; link.download = "SBN-Leaderboard-Roku.zip"; document.body.appendChild(link); link.click(); link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+        await loadRoku({ text: "Downloaded SBN-Leaderboard-Roku.zip ✓ Now follow the steps below to put it on your Roku.", color: "var(--green)" });
+      } catch (e) { say(e.message || "Couldn't build the app.", "var(--red)"); }
+    } }));
+    rokuBox.appendChild(note);
+
+    // the sound the TV plays for a deal when the rep has none of their own, and how loud
+    const ready = sounds.filter((s) => s.tvReady);
+    const sel = el("select", { style: "width:100%;margin-bottom:8px" });
+    const opt = (v, t) => el("option", { value: v, text: t });
+    sel.appendChild(opt("random", "Random 🎲 (all sounds)"));
+    Object.entries(DEAL_SOUNDS).forEach(([k, d]) => sel.appendChild(opt(k, d.name)));
+    if (ready.length) { const g = document.createElement("optgroup"); g.label = "My sounds (ready for the Roku)"; g.appendChild(opt("custom-random", "Random: just my sounds 🎲")); ready.forEach((s) => g.appendChild(opt("custom:" + s.id, "🎵 " + s.name))); sel.appendChild(g); }
+    sel.appendChild(opt("off", "Off (silent)"));
+    sel.value = tv.settings.defaultSound; if (sel.value !== tv.settings.defaultSound) sel.value = "random";
+    const vol = el("select", { style: "width:100%;margin-bottom:8px" }, [opt("low", "Volume: low"), opt("medium", "Volume: medium"), opt("high", "Volume: high")]);
+    vol.value = tv.settings.volume;
+    const saveSetting = async (body) => { try { await api("/api/tv/settings", { method: "PUT", body: JSON.stringify(body) }); say("Saved ✓", "var(--green)"); } catch (e) { loadRoku({ text: e.message || "Not saved.", color: "var(--red)" }); } };
+    sel.addEventListener("change", () => saveSetting({ defaultSound: sel.value }));
+    vol.addEventListener("change", () => saveSetting({ volume: vol.value }));
+    rokuBox.appendChild(el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.04em;margin:14px 0 4px", text: "SOUND ON THE TV" }));
+    rokuBox.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: "Reps with their own sound (see REP SOUNDS above) get theirs. Everyone else gets this. Off keeps the TV silent." }));
+    rokuBox.appendChild(sel); rokuBox.appendChild(vol);
+
+    // the owner's own sounds need a Roku copy; this makes it for the ones uploaded before the Roku app existed
+    if (sounds.length) {
+      const waiting = sounds.filter((s) => !s.tvReady);
+      rokuBox.appendChild(el("div", { class: "muted", style: "font-size:12.5px;margin-top:6px", text: `${ready.length} of your ${sounds.length} own sounds ${ready.length === 1 ? "is" : "are"} ready for the Roku.` }));
+      if (waiting.length) {
+        const prog = el("div", { class: "muted", style: "font-size:12px;margin-top:6px;min-height:16px" });
+        rokuBox.appendChild(el("button", { class: "ghost", style: "margin-top:8px", text: `Get my ${waiting.length} other sound${waiting.length === 1 ? "" : "s"} ready for the Roku`, onclick: async () => {
+          const ctx = dealAudioContext();
+          if (!ctx) { prog.textContent = "This browser can't prepare sounds."; return; }
+          let done = 0, failed = 0;
+          for (const s of waiting) {
+            prog.textContent = `Preparing ${done + failed + 1} of ${waiting.length}: ${s.name}...`;
+            let ok = false;
+            try { const r = await fetch(`/api/sounds/${s.id}/file`, { credentials: "same-origin" }); ok = await prepareForRoku(s.id, await decodeDealAudio(ctx, await r.arrayBuffer())); } catch (e) { ok = false; }
+            if (ok) done += 1; else failed += 1;
+          }
+          await loadRoku({ text: failed ? `${done} ready. ${failed} couldn't be converted (this browser couldn't read the file).` : `All ${done} are ready for the Roku ✓`, color: failed ? "var(--amber)" : "var(--green)" });
+        } }));
+        rokuBox.appendChild(prog);
+      }
+    }
+
+    // the one-time setup on the Roku
+    rokuBox.appendChild(el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.04em;margin:16px 0 6px", text: "PUTTING THE APP ON YOUR ROKU (ONE TIME, ABOUT 10 MINUTES)" }));
+    const steps = [
+      "Press Download the Roku app above and keep the file it saves (SBN-Leaderboard-Roku.zip).",
+      "On the Roku remote press, quickly: Home three times, Up twice, Right, Left, Right, Left, Right. The Roku's Developer Settings screen appears.",
+      "Write down the IP address it shows. Choose Enable installer and restart, accept the agreement, and make up a password (write it down). The Roku restarts.",
+      "On this computer (on the same Wi-Fi as the Roku) open a new browser tab and go to http://THE-IP-ADDRESS. Sign in with the username rokudev and your password.",
+      "Press Upload, choose the zip file, then Install. The leaderboard starts on the TV.",
+    ];
+    steps.forEach((t, i) => rokuBox.appendChild(el("div", { style: "font-size:12.5px;margin-bottom:5px;display:flex;gap:8px" }, [el("span", { class: "muted", style: "min-width:18px", text: `${i + 1}.` }), el("span", { text: t })])));
+    rokuBox.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-top:8px", text: "A Roku can hold only one app installed this way at a time. If the power goes out, open SBN Leaderboard from the Roku home screen again. If a TV's power-saving setting turns it off after a few hours, switch that off in the TV's settings." }));
+    if (tv.hasKey) rokuBox.appendChild(el("button", { class: "icon-danger", style: "margin-top:12px", text: "Turn the Roku app off", onclick: async () => {
+      if (!confirm("Turn the Roku app off? The leaderboard on your Roku stops working until you download and install a new app.")) return;
+      try { await api("/api/tv/key", { method: "DELETE" }); await loadRoku({ text: "The Roku app is turned off.", color: "var(--amber)" }); } catch (e) { say(e.message || "Couldn't do that.", "var(--red)"); }
+    } }));
+    if (msg) say(msg.text, msg.color);
+  }
+  loadRoku();
+
   // ---- Password ----
   content.appendChild(el("div", { class: "muted", style: "margin:24px 0 12px", text: "PASSWORD" }));
   const pwWarn = el("div", { style: "display:none;font-size:12.5px;color:var(--amber);border:0.5px solid var(--amber);border-radius:8px;padding:8px 10px;margin-bottom:12px", text: "⚠ The RESET_OWNER_PASSWORD variable is still set in Railway. While it's there, it puts that password back every time this tool restarts, undoing what you set here. Delete it in Railway → Variables." });
@@ -1225,6 +1312,51 @@ function customSoundLevel(channels) {
 }
 // ---- DEAL SOUNDS: CUSTOM LEVEL END ----
 
+// ---- DEAL SOUNDS: ROKU WAV START ----
+// The Roku plays WAV files, so each of the owner's own sounds also gets a Roku copy: a 16-bit mono WAV at 22,050 Hz, brought to the same loudness as the
+// built-in sounds (so one clip never blasts while another whispers) and never longer than the limit. The browser makes it, because a browser can read
+// any audio format; the tracker only checks it and keeps it.
+const TV_WAV_RATE = 22050, TV_TARGET_RMS = 0.14, TV_PEAK_CAP = 0.92;
+function makeTvWav(channels, srcRate) {
+  const total = channels[0].length, seconds = Math.min(total / srcRate, MAX_CUSTOM_SECONDS), n = Math.floor(seconds * TV_WAV_RATE);
+  const mono = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const pos = i * srcRate / TV_WAV_RATE, i0 = Math.floor(pos), f = pos - i0;
+    let s = 0;
+    for (let c = 0; c < channels.length; c++) { const d = channels[c], x = d[i0] || 0, y = d[Math.min(i0 + 1, d.length - 1)] || 0; s += x + (y - x) * f; }
+    mono[i] = s / channels.length;
+  }
+  let peak = 0, first = -1, last = -1;
+  for (let i = 0; i < n; i++) { const m = Math.abs(mono[i]); if (m > peak) peak = m; if (m > 0.002) { if (first < 0) first = i; last = i; } }
+  if (first < 0) return { silent: true, bytes: null };
+  let sum = 0;
+  for (let i = first; i <= last; i++) sum += mono[i] * mono[i];
+  const rms = Math.sqrt(sum / (last - first + 1)), gain = Math.max(0.05, Math.min(TV_TARGET_RMS / rms, TV_PEAK_CAP / peak, 8));
+  const fade = Math.min(Math.round(0.008 * TV_WAV_RATE), n >> 1);
+  const bytes = new Uint8Array(44 + n * 2), v = new DataView(bytes.buffer);
+  const tag = (o, str) => { for (let i = 0; i < str.length; i++) bytes[o + i] = str.charCodeAt(i); };
+  tag(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); tag(8, "WAVE"); tag(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, TV_WAV_RATE, true); v.setUint32(28, TV_WAV_RATE * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); tag(36, "data"); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    let x = mono[i] * gain;
+    if (i < fade) x *= i / fade; else if (n - 1 - i < fade) x *= (n - 1 - i) / fade;       // a few thousandths of a second of fade at each end, so there is no click
+    v.setInt16(44 + i * 2, Math.max(-32768, Math.min(32767, Math.round(x * 32767))), true);
+  }
+  return { silent: false, bytes, gain };
+}
+// ---- DEAL SOUNDS: ROKU WAV END ----
+// Makes the Roku copy of an already-decoded sound and sends it to the tracker. true if the tracker accepted it.
+async function prepareForRoku(id, audioBuffer) {
+  try {
+    const channels = [];
+    for (let c = 0; c < audioBuffer.numberOfChannels; c++) channels.push(audioBuffer.getChannelData(c));
+    const w = makeTvWav(channels, audioBuffer.sampleRate);
+    if (!w.bytes) return false;
+    const r = await fetch(`/api/sounds/${id}/tv-wav`, { method: "PUT", headers: { "Content-Type": "audio/wav" }, body: w.bytes, credentials: "same-origin" });
+    return r.ok;
+  } catch (e) { return false; }
+}
+
 // Browsers refuse to play sound until the person has tapped or clicked the page once, so the sound system is only woken up by a tap.
 let dealAudio = null;
 const dealCustom = { list: [], buffers: new Map(), pending: new Map(), current: null };   // the owner's own sounds: the list, the ones ready to play, the ones being fetched, the one playing now
@@ -1521,6 +1653,12 @@ async function renderLeaderboard(app) {
     rebuildChoiceOptions(); renderCustomList(); refreshSoundUi();
     say(`Added “${saved.name}” ✓ and switched to it.`, "var(--green)");
     wakeSound(() => playCustomSound(saved.id, soundPrefs.volume));
+    prepareForRoku(saved.id, buf).then((ok) => {                    // and its Roku copy, quietly in the background
+      if (!ok) return;
+      const entry = dealCustom.list.find((x) => x.id === saved.id);
+      if (entry) entry.tvReady = true;
+      say(`Added “${saved.name}” ✓ and switched to it. It's ready for the Roku too.`, "var(--green)");
+    });
   }
   rebuildChoiceOptions(); renderCustomList();
   choiceSel.addEventListener("change", () => { soundPrefs.choice = choiceSel.value; saveDealSoundPrefs(soundPrefs); refreshSoundUi(); if (soundPrefs.choice !== "off") wakeSound(preview); });
