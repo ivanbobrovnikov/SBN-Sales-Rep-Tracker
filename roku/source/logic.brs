@@ -99,3 +99,18 @@ function tv_volume(v as dynamic) as integer
     if n > 100 then n = 100
     return n
 end function
+
+' The ways the TV may play a sound, in the order to try them. Some TVs are silent with one way and fine with the other, so by default it tries
+' the audio player first and the sound-effects player after it; the owner can force one in the tracker's Settings.
+function tv_attempts(method as dynamic) as object
+    if method = "effects" then return [{ method: "effects", fmt: "" }]
+    if method = "player" then return [{ method: "player", fmt: "" }, { method: "player", fmt: "wav" }]
+    return [{ method: "player", fmt: "" }, { method: "player", fmt: "wav" }, { method: "effects", fmt: "" }]
+end function
+
+' any value as text ("" if it can't be)
+function tv_text(v as dynamic) as string
+    if v = invalid then return ""
+    if GetInterface(v, "ifToStr") <> invalid then return v.ToStr()
+    return ""
+end function
