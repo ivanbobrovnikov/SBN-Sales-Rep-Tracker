@@ -54,6 +54,7 @@ async function boot() {
 
 function stopLeaderboardPolling() {
   if (window._leaderboardInterval) { clearInterval(window._leaderboardInterval); window._leaderboardInterval = null; }
+  if (window._rokuTimer) { clearInterval(window._rokuTimer); window._rokuTimer = null; }
 }
 
 function render() {
@@ -305,6 +306,35 @@ async function renderSettings(content) {
     } }));
     rokuBox.appendChild(note);
 
+    // is the TV alive, and what does it say it is doing (its model, which sound it tried, whether that worked)
+    if (window._rokuTimer) { clearInterval(window._rokuTimer); window._rokuTimer = null; }
+    if (tv.hasKey) {
+      const ago = (iso) => { const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000)); return s < 60 ? `${s} second${s === 1 ? "" : "s"} ago` : s < 3600 ? `${Math.round(s / 60)} minute${Math.round(s / 60) === 1 ? "" : "s"} ago` : `${Math.round(s / 3600)} hour${Math.round(s / 3600) === 1 ? "" : "s"} ago`; };
+      const statusLine = el("div", { style: "font-size:13px;margin:14px 0 6px" });
+      const reportsBox = el("div", { style: "margin:4px 0 2px" });
+      const paintStatus = (st) => {
+        const fresh = st.lastSeenAt && Date.now() - Date.parse(st.lastSeenAt) < 45000;
+        statusLine.textContent = st.lastSeenAt ? `${fresh ? "●" : "○"} The TV checked in ${ago(st.lastSeenAt)}` : "○ The TV hasn't checked in yet (it checks every 15 seconds once the app is open)";
+        statusLine.style.color = fresh ? "var(--green)" : "var(--amber)";
+        while (reportsBox.firstChild) reportsBox.removeChild(reportsBox.firstChild);
+        if (st.reports && st.reports.length) {
+          reportsBox.appendChild(el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.04em;margin-bottom:4px", text: "WHAT THE TV REPORTS (NEWEST FIRST)" }));
+          st.reports.forEach((r) => reportsBox.appendChild(el("div", { style: "font-size:11.5px;margin-bottom:2px;color:" + (/error|fail|timeout/.test(r.event) ? "var(--amber)" : "var(--sub)") }, [
+            el("span", { class: "muted", text: new Date(r.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" }) + "  " }), el("span", { style: "font-weight:600", text: r.event + "  " }), el("span", { text: r.detail })])));
+        }
+      };
+      paintStatus(tv);
+      rokuBox.appendChild(statusLine);
+      rokuBox.appendChild(el("button", { class: "ghost", text: "Play a test sound on the TV", onclick: async () => {
+        try { await api("/api/tv/test-sound", { method: "POST", body: JSON.stringify({}) }); say("Asked the TV to play a test sound. It picks that up within about 15 seconds: look for a blue banner and listen. Then see what the TV reports below.", "var(--green)"); } catch (e) { say(e.message || "Couldn't ask the TV.", "var(--red)"); }
+      } }));
+      rokuBox.appendChild(reportsBox);
+      window._rokuTimer = setInterval(async () => {
+        if (!document.body.contains(statusLine)) { clearInterval(window._rokuTimer); window._rokuTimer = null; return; }
+        try { paintStatus(await api("/api/tv")); } catch (e) { /* offline for a moment */ }
+      }, 8000);
+    }
+
     // the sound the TV plays for a deal when the rep has none of their own, and how loud
     const ready = sounds.filter((s) => s.tvReady);
     const sel = el("select", { style: "width:100%;margin-bottom:8px" });
@@ -322,6 +352,13 @@ async function renderSettings(content) {
     rokuBox.appendChild(el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.04em;margin:14px 0 4px", text: "SOUND ON THE TV" }));
     rokuBox.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: "Reps with their own sound (see REP SOUNDS above) get theirs. Everyone else gets this. Off keeps the TV silent." }));
     rokuBox.appendChild(sel); rokuBox.appendChild(vol);
+    // some TVs are silent with one way of playing sounds and fine with the other
+    const method = el("select", { style: "width:100%;margin-bottom:8px" }, [opt("auto", "Try both ways (recommended)"), opt("player", "Audio player only"), opt("effects", "Sound-effects player only")]);
+    method.value = tv.settings.soundMethod || "auto";
+    method.addEventListener("change", () => saveSetting({ soundMethod: method.value }));
+    rokuBox.appendChild(el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.04em;margin:14px 0 4px", text: "HOW THE TV PLAYS SOUNDS" }));
+    rokuBox.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: "If you can't hear anything, press Play a test sound on the TV, then try the other choices here. The volume above only applies to the sound-effects player." }));
+    rokuBox.appendChild(method);
 
     // the owner's own sounds need a Roku copy; this makes it for the ones uploaded before the Roku app existed
     if (sounds.length) {
