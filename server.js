@@ -35,6 +35,7 @@ function loadDB() {
   if (!db.tv) db.tv = { keyHash: null, createdAt: null, settings: { defaultSound: "random", volume: "medium" } };
   if (!db.tv.settings) db.tv.settings = { defaultSound: "random", volume: "medium" };
   if (!db.tv.settings.soundMethod) db.tv.settings.soundMethod = "auto";
+  if (db.tv.settings.confetti === undefined) db.tv.settings.confetti = true;
   if (!db.tv.reports) db.tv.reports = [];
   if (!db.tv.test) db.tv.test = { seq: 0, sound: null };
   if (db.ownerPasswordHash === undefined) db.ownerPasswordHash = OWNER_PASSWORD_HASH_ENV || null;
@@ -539,6 +540,43 @@ function resolveTvSound(db, repName, closeKey) {
 }
 const easternDay = (d) => new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
 
+
+// ---- what the TV's rep rows show besides the numbers: a badge (initials on a color), and progress toward the rep's goal ----
+const REP_COLORS = ["0x3B82F6FF", "0x22C55EFF", "0xF59E0BFF", "0xA855F7FF", "0xEF4444FF", "0x14B8A6FF", "0xEC4899FF", "0x6366F1FF"];
+const repColor = (name) => REP_COLORS[parseInt(sha256(repKey(name)).slice(0, 2), 16) % REP_COLORS.length];     // the same rep always gets the same color
+const repInitials = (name) => {
+  const words = String(name || "").trim().split(/\s+/).filter(Boolean).map((w) => Array.from(w)[0]);
+  if (!words.length) return "?";
+  return (words.length > 1 ? words[0] + words[words.length - 1] : words[0]).toUpperCase();
+};
+// Goal progress exactly as the web screens work it out: closes and value count deals CLOSED in the week/month, commission counts real commission from cars
+// that ARRIVED. A rep with a weekly goal shows that one; otherwise their monthly one. Remembered for a minute, so the TV never makes the shops work harder.
+let tvGoalCache = { at: 0, key: "", data: {} };
+async function tvGoalProgress(db) {
+  const goals = (db.goals || []).filter((g) => g && g.repName && Number(g.target) > 0 && (g.cadence === "week" || g.cadence === "month"));
+  if (!goals.length) return {};
+  const today = easternDay(new Date());
+  const key = JSON.stringify(goals.map((g) => [g.repName, g.metric, g.cadence, g.target])) + today;
+  if (tvGoalCache.key === key && Date.now() - tvGoalCache.at < 60000) return tvGoalCache.data;
+  try {
+    const byCadence = {};
+    await Promise.all(Array.from(new Set(goals.map((g) => g.cadence))).map(async (cad) => {
+      const [c, a] = await Promise.all([buildCombinedStats(db, { period: cad, date: today, dateBasis: "closed" }), buildCombinedStats(db, { period: cad, date: today })]);
+      byCadence[cad] = { closing: Object.fromEntries(c.perRep.map((r) => [r.name, r])), arrival: Object.fromEntries(a.perRep.map((r) => [r.name, r])) };
+    }));
+    const out = {};
+    goals.slice().sort((x, y) => (x.cadence === "week" ? 0 : 1) - (y.cadence === "week" ? 0 : 1)).forEach((g) => {
+      if (out[g.repName]) return;
+      const s = byCadence[g.cadence], c = s.closing[g.repName], a = s.arrival[g.repName];
+      const current = g.metric === "commission" ? (a ? a.actualCommission : 0) : g.metric === "value" ? (c ? c.closedValue : 0) : (c ? c.closeCount : 0);
+      const isCount = g.metric === "closes", toUnits = (n) => (isCount ? Math.round(n) : Math.round((Number(n) || 0) * 100));
+      out[g.repName] = { cadence: g.cadence, metric: g.metric, pct: Math.min(100, Math.round((current / g.target) * 100)), current: toUnits(current), target: toUnits(g.target) };
+    });
+    tvGoalCache = { at: Date.now(), key, data: out };
+    return out;
+  } catch (e) { return {}; }             // goals are a nice extra: if they can't be worked out, the leaderboard still shows
+}
+
 // Exactly what the web leaderboard shows: the same two questions (what each rep closed today; what actually arrived today), merged by rep name,
 // ranked by value closed, then deals closed, then commission, then name. All money goes out as WHOLE CENTS: the TV's numbers are single-precision
 // and would lose cents on larger amounts if decimals were used.
@@ -551,7 +589,9 @@ async function buildTvFeed(db) {
   const merged = Object.entries(byName).map(([name, { closing: c, arrival: a }]) => ({ name, closeCount: c ? c.closeCount : 0, closedValue: c ? c.closedValue : 0, arrivedCount: a ? a.arrivedCount : 0, commission: a ? a.actualCommission : 0 }));
   merged.sort((x, y) => y.closedValue - x.closedValue || y.closeCount - x.closeCount || y.commission - x.commission || x.name.localeCompare(y.name));
   const cents = (n) => Math.round((Number(n) || 0) * 100);
-  const rows = merged.map((r, i) => ({ rank: i + 1, name: r.name, closedCents: cents(r.closedValue), closeCount: r.closeCount, arrivedCount: r.arrivedCount, commissionCents: cents(r.commission) }));
+  const goals = await tvGoalProgress(db);
+  const rows = merged.map((r, i) => ({ rank: i + 1, name: r.name, initials: repInitials(r.name), color: repColor(r.name), closedCents: cents(r.closedValue), closeCount: r.closeCount, arrivedCount: r.arrivedCount, commissionCents: cents(r.commission), goal: goals[r.name] || null }));
+  const totals = { closedCents: rows.reduce((a, r) => a + r.closedCents, 0), closeCount: rows.reduce((a, r) => a + r.closeCount, 0), arrivedCount: rows.reduce((a, r) => a + r.arrivedCount, 0), commissionCents: rows.reduce((a, r) => a + r.commissionCents, 0) };
   const now = Date.now();
   const closes = closing.perRep.flatMap((r) => r.closes.map((c) => {
     const key = `${c.locationId}:${c.id}`, at = Date.parse(c.closedAt);
@@ -562,7 +602,7 @@ async function buildTvFeed(db) {
   if (settings.defaultSound === "random" || settings.defaultSound === "custom-random") ready.forEach((id) => need.add(id));
   else if (typeof settings.defaultSound === "string" && settings.defaultSound.indexOf("custom:") === 0 && ready.includes(settings.defaultSound.slice(7))) need.add(settings.defaultSound.slice(7));
   db.repSounds.forEach((r) => { if (r.choice.indexOf("custom:") === 0 && ready.includes(r.choice.slice(7))) need.add(r.choice.slice(7)); });
-  return { now: new Date(now).toISOString(), clock: { h: parts.hour || 0, m: parts.minute || 0, s: parts.second || 0 }, volume: TV_VOLUMES[settings.volume] || 70, soundMethod: settings.soundMethod || "auto", test: { seq: db.tv.test.seq || 0, sound: db.tv.test.sound }, rows, closes, customSounds: Array.from(need), unreachable: Array.from(new Set([...closing.errors, ...arrival.errors].map((e) => e.locationName))) };
+  return { now: new Date(now).toISOString(), clock: { h: parts.hour || 0, m: parts.minute || 0, s: parts.second || 0 }, volume: TV_VOLUMES[settings.volume] || 70, soundMethod: settings.soundMethod || "auto", confetti: settings.confetti !== false, totals, test: { seq: db.tv.test.seq || 0, sound: db.tv.test.sound }, rows, closes, customSounds: Array.from(need), unreachable: Array.from(new Set([...closing.errors, ...arrival.errors].map((e) => e.locationName))) };
 }
 app.get("/api/tv/feed", tvAuth, async (req, res) => {
   tvLastSeenAt = Date.now();
@@ -583,12 +623,14 @@ app.get("/api/tv", requireOwner, (req, res) => {
 });
 app.put("/api/tv/settings", requireOwner, (req, res) => {
   const db = loadDB();
-  const { defaultSound, volume, soundMethod } = req.body || {};
+  const { defaultSound, volume, soundMethod, confetti } = req.body || {};
   const ready = db.sounds.filter((s) => s.tvWav).map((s) => s.id);
   const okSound = defaultSound === undefined || defaultSound === "random" || defaultSound === "off" || defaultSound === "custom-random" || BUILTIN_SOUND_KEYS.includes(defaultSound) || (typeof defaultSound === "string" && /^custom:[a-f0-9]{16}$/.test(defaultSound) && ready.includes(defaultSound.slice(7)));
   if (!okSound) return res.status(400).json({ error: "That sound isn't available on the Roku yet." });
   if (volume !== undefined && !TV_VOLUMES[volume]) return res.status(400).json({ error: "Volume must be low, medium or high." });
   if (soundMethod !== undefined && !TV_SOUND_METHODS.includes(soundMethod)) return res.status(400).json({ error: "Unknown way of playing sounds." });
+  if (confetti !== undefined && typeof confetti !== "boolean") return res.status(400).json({ error: "Confetti must be on or off." });
+  if (confetti !== undefined) db.tv.settings.confetti = confetti;
   if (soundMethod !== undefined) db.tv.settings.soundMethod = soundMethod;
   if (defaultSound !== undefined) db.tv.settings.defaultSound = defaultSound;
   if (volume !== undefined) db.tv.settings.volume = volume;
