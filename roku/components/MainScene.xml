@@ -35,8 +35,8 @@
       <Label id="bannerSub" text="" color="0xE3FFEEFF" translation="[0,132]" width="1600" height="50" horizAlign="center" />
     </Group>
     <Label id="status" text="" font="font:SmallSystemFont" color="0xFFB454FF" translation="[100,1036]" width="900" height="36" />
+    <Label id="version" text="v1.2" font="font:SmallestSystemFont" color="0x3F4D69FF" translation="[1760,1052]" width="60" height="26" horizAlign="right" />
     <Label id="diag" text="" font="font:SmallestSystemFont" color="0x6F7C96FF" translation="[1000,1042]" width="820" height="30" horizAlign="right" />
-    <Audio id="audioPlayer" />
     <Animation id="confettiAnim" duration="3.4" repeat="false" easeFunction="linear">
       <Vector2DFieldInterpolator id="confettiInterp" fieldToInterp="confetti.translation" key="[0.0, 1.0]" keyValue="[[0.0, -1080.0], [0.0, 0.0]]" />
     </Animation>

@@ -21,7 +21,12 @@ sub init()
     m.confettiTimer = m.top.findNode("confettiTimer")
     m.confetti = m.top.findNode("confetti")
     m.confettiAnim = m.top.findNode("confettiAnim")
-    m.audio = m.top.findNode("audioPlayer")
+    m.audio = invalid            ' the audio player is made fresh for every attempt (see stopPlayer / nextAttempt) and never reused
+    m.audioMade = 0
+    m.soundSeq = 0
+    m.lastOutcome = "none"
+    m.prevOutcome = "none"
+    m.lastSoundAt = 0
     m.state = tv_newState()
     m.have = {}
     m.wanted = []
@@ -51,6 +56,7 @@ sub init()
     m.sndAttempts = []
     m.sndTry = 0
     m.reportQueue = []
+    m.checkTask = invalid
     m.reporting = false
     m.pollTimer.observeField("fire", "pollNow")
     m.clockTimer.observeField("fire", "tickClock")
@@ -59,7 +65,6 @@ sub init()
     m.soundTimer.observeField("fire", "onSoundTimeout")
     m.countTimer.observeField("fire", "tickCount")
     m.confettiTimer.observeField("fire", "hideConfetti")
-    m.audio.observeField("state", "onAudioState")
     setFont(m.top.findNode("title"), "bold", 66)
     setFont(m.clockLabel, "semibold", 60)
     setFont(m.top.findNode("bannerTop"), "semibold", 30)
@@ -84,8 +89,32 @@ sub init()
     osv = di.GetOSVersion()
     osText = ""
     if osv <> invalid then osText = tv_text(osv.major) + "." + tv_text(osv.minor) + " build " + tv_text(osv.build)
-    report("started", "SBN Leaderboard 1.1 on " + tv_text(di.GetModelDisplayName()) + " (" + tv_text(di.GetModel()) + ") Roku OS " + osText)
+    report("started", "SBN Leaderboard 1.2 on " + tv_text(di.GetModelDisplayName()) + " (" + tv_text(di.GetModel()) + ") Roku OS " + osText)
+    checkSounds()
     pollNow()
+end sub
+
+' One quick check of the sound files inside the installed app, reported to the tracker (is each file the size and content it should be?).
+sub checkSounds()
+    if m.cfg.skipFileCheck = true then return        ' (tests only: the emulator is very slow at this, a real Roku isn't)
+    text = ReadAsciiFile("pkg:/sounds/check.json")
+    if text = invalid or text = "" then return
+    files = ParseJson(text)
+    if files = invalid then return
+    task = CreateObject("roSGNode", "CheckTask")
+    task.observeField("result", "onChecked")
+    task.files = files
+    m.checkTask = task
+    task.control = "RUN"
+end sub
+
+sub onChecked(event as object)
+    r = event.getData()
+    if r = invalid then return
+    for each key in r
+        report("file_check", key + ".wav: " + r[key])
+        print "TV> file check " + key + " " + r[key]
+    end for
 end sub
 
 function loadConfig() as dynamic
@@ -480,25 +509,48 @@ sub playSound(sound as dynamic, label as string)
     m.sndLabel = label
     m.sndAttempts = tv_attempts(m.soundMethod)
     m.sndTry = 0
+    m.soundSeq = m.soundSeq + 1
+    m.prevOutcome = m.lastOutcome        ' how the sound before this one went (kept for the reports: it shows whether a failure depends on what came before)
+    m.prevGap = Int(Uptime(0) - m.lastSoundAt)
+    m.lastOutcome = "pending"
+    m.lastSoundAt = Uptime(0)
+    stopPlayer()
     nextAttempt()
+end sub
+
+' a short note for the reports: which attempt this was, and how the previous sound went
+function soundContext() as string
+    return " [attempt " + m.sndTry.ToStr() + " of " + m.sndAttempts.Count().ToStr() + ", sound #" + m.soundSeq.ToStr() + " since the app started, the one before it: " + m.prevOutcome + " " + m.prevGap.ToStr() + "s earlier]"
+end function
+
+' The audio player is never reused: a player left in an error (or just-finished) state can refuse the next sound, so each attempt gets a brand new one
+' and the old one is thrown away.
+sub stopPlayer()
+    if m.audio = invalid then return
+    m.audio.unobserveField("state")
+    m.audio.control = "stop"
+    if m.audio.getParent() <> invalid then m.top.removeChild(m.audio)
+    m.audio = invalid
 end sub
 
 ' Tries the ways of playing a sound one after another until one works. Whatever happens is reported to the tracker so it can be seen from there.
 sub nextAttempt()
     m.soundTimer.control = "stop"
     if m.sndTry >= m.sndAttempts.Count()
+        m.lastOutcome = "failed"
         showDiag("Could not play the sound for " + m.sndLabel)
-        report("sound_failed", m.sndPath + " (every way failed)")
+        report("sound_failed", m.sndPath + " (every way failed)" + soundContext())
         print "TV> sound failed " + m.sndPath
         return
     end if
     a = m.sndAttempts[m.sndTry]
     m.sndTry = m.sndTry + 1
     if a.method = "effects"
+        stopPlayer()            ' let go of the audio player first, so it isn't holding the sound output
         res = CreateObject("roAudioResource", m.sndPath)
         if res = invalid
             print "TV> could not open(effects) " + m.sndPath
-            report("sound_error", "sound-effects player could not open " + m.sndPath)
+            report("sound_error", "sound-effects player could not open " + m.sndPath + soundContext())
             nextAttempt()
             return
         end if
@@ -506,42 +558,56 @@ sub nextAttempt()
         m.player = res
         print "TV> play(effects) " + m.sndPath + " volume=" + m.volume.ToStr()
         if ok = invalid or ok
+            m.lastOutcome = "ok"
             showDiag("Played " + m.sndLabel + " (sound-effects player)")
-            report("sound_ok", m.sndPath + " via the sound-effects player, volume " + m.volume.ToStr())
+            report("sound_ok", m.sndPath + " via the sound-effects player, volume " + m.volume.ToStr() + soundContext())
         else
-            report("sound_error", "sound-effects player would not start " + m.sndPath)
+            report("sound_error", "sound-effects player would not start " + m.sndPath + soundContext())
             nextAttempt()
         end if
     else
+        stopPlayer()
         content = CreateObject("roSGNode", "ContentNode")
         content.url = m.sndPath
         if a.fmt <> "" then content.streamFormat = a.fmt
-        m.audio.control = "stop"
-        m.audio.content = content
-        m.audio.control = "play"
+        node = CreateObject("roSGNode", "Audio")
+        m.audioMade = m.audioMade + 1
+        node.observeField("state", "onAudioState")
+        m.top.appendChild(node)
+        node.content = content
+        m.audio = node
+        print "TV> new audio player #" + m.audioMade.ToStr()
+        node.control = "play"
         m.soundTimer.control = "start"
         print "TV> play(player) " + m.sndPath + " format=[" + a.fmt + "]"
     end if
 end sub
 
-sub onAudioState()
-    st = m.audio.state
+sub onAudioState(event as object)
+    node = event.getRoSGNode()
+    if m.audio = invalid then return
+    if not node.isSameNode(m.audio) then return          ' a late message from a player we already threw away
+    st = node.state
     print "TV> audio state=" + st
     if st = "playing"
         m.soundTimer.control = "stop"
+        m.lastOutcome = "ok"
         showDiag("Played " + m.sndLabel + " (audio player)")
-        report("sound_ok", m.sndPath + " via the audio player")
+        report("sound_ok", m.sndPath + " via the audio player" + soundContext())
     else if st = "error"
         m.soundTimer.control = "stop"
-        report("sound_error", "audio player error on " + m.sndPath + ": " + tv_text(m.audio.errorMsg) + " code " + tv_text(m.audio.errorCode))
+        report("sound_error", "audio player error on " + m.sndPath + ": " + tv_text(node.errorMsg) + " code " + tv_text(node.errorCode) + soundContext())
+        stopPlayer()
         nextAttempt()
+    else if st = "finished"
+        stopPlayer()
     end if
 end sub
 
 sub onSoundTimeout()
     print "TV> audio player never started"
-    report("sound_timeout", "audio player never started " + m.sndPath)
-    m.audio.control = "stop"
+    report("sound_timeout", "audio player never started " + m.sndPath + soundContext())
+    stopPlayer()
     nextAttempt()
 end sub
 
