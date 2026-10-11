@@ -581,8 +581,9 @@ async function tvGoalProgress(db) {
 // Exactly what the web leaderboard shows: the same two questions (what each rep closed today; what actually arrived today), merged by rep name,
 // ranked by value closed, then deals closed, then commission, then name. All money goes out as WHOLE CENTS: the TV's numbers are single-precision
 // and would lose cents on larger amounts if decimals were used.
-async function buildTvFeed(db) {
+async function buildTvBase(db) {
   const today = easternDay(new Date());
+  const goalsP = tvGoalProgress(db);       // started at once, alongside the main questions, so the goal bars never add a second round of waiting
   const [closing, arrival] = await Promise.all([buildCombinedStats(db, { period: "day", date: today, dateBasis: "closed" }), buildCombinedStats(db, { period: "day", date: today })]);
   const byName = {};
   closing.perRep.forEach((r) => { byName[r.name] = byName[r.name] || {}; byName[r.name].closing = r; });
@@ -590,25 +591,59 @@ async function buildTvFeed(db) {
   const merged = Object.entries(byName).map(([name, { closing: c, arrival: a }]) => ({ name, closeCount: c ? c.closeCount : 0, closedValue: c ? c.closedValue : 0, arrivedCount: a ? a.arrivedCount : 0, commission: a ? a.actualCommission : 0 }));
   merged.sort((x, y) => y.closedValue - x.closedValue || y.closeCount - x.closeCount || y.commission - x.commission || x.name.localeCompare(y.name));
   const cents = (n) => Math.round((Number(n) || 0) * 100);
-  const goals = await tvGoalProgress(db);
-  const photoOf = (name) => { const p = (db.repPhotos || []).find((x) => x.key === repKey(name)); return p ? { id: p.id } : null; };
-  const rows = merged.map((r, i) => ({ rank: i + 1, name: r.name, initials: repInitials(r.name), color: repColor(r.name), photo: photoOf(r.name), closedCents: cents(r.closedValue), closeCount: r.closeCount, arrivedCount: r.arrivedCount, commissionCents: cents(r.commission), goal: goals[r.name] || null }));
+  // the goal bars get at most 2.5 more seconds once the main numbers are in; if they aren't ready, the last known ones are used
+  const goals = await Promise.race([goalsP, new Promise((resolve) => setTimeout(() => resolve(tvGoalCache.data || {}), 2500))]);
+  const rows = merged.map((r, i) => ({ rank: i + 1, name: r.name, initials: repInitials(r.name), color: repColor(r.name), closedCents: cents(r.closedValue), closeCount: r.closeCount, arrivedCount: r.arrivedCount, commissionCents: cents(r.commission), goal: goals[r.name] || null }));
   const totals = { closedCents: rows.reduce((a, r) => a + r.closedCents, 0), closeCount: rows.reduce((a, r) => a + r.closeCount, 0), arrivedCount: rows.reduce((a, r) => a + r.arrivedCount, 0), commissionCents: rows.reduce((a, r) => a + r.commissionCents, 0) };
+  const closes = closing.perRep.flatMap((r) => r.closes.map((c) => ({ key: `${c.locationId}:${c.id}`, repName: r.name, priceCents: cents(c.basePrice), service: c.baseService || c.car || "", location: c.locationName || "", closedAtMs: Date.parse(c.closedAt) })));
+  return { rows, closes, totals, unreachable: Array.from(new Set([...closing.errors, ...arrival.errors].map((e) => e.locationName))) };
+}
+
+// The shop answers (the slow part) are kept apart from everything that comes from YOUR settings (sounds, volume, confetti, test button, photos, the clock),
+// which is added fresh every time, so a change in Settings reaches the TV at once even when the shop answers are a little old.
+function assembleTvFeed(db, base, stale) {
   const now = Date.now();
-  const closes = closing.perRep.flatMap((r) => r.closes.map((c) => {
-    const key = `${c.locationId}:${c.id}`, at = Date.parse(c.closedAt);
-    return { key, repName: r.name, priceCents: cents(c.basePrice), service: c.baseService || c.car || "", location: c.locationName || "", ageSec: Number.isFinite(at) ? Math.round((now - at) / 1000) : null, sound: resolveTvSound(db, r.name, key) };
-  }));
+  const photoOf = (name) => { const p = (db.repPhotos || []).find((x) => x.key === repKey(name)); return p ? { id: p.id } : null; };
+  const rows = base.rows.map((r) => ({ ...r, photo: photoOf(r.name) }));
+  const closes = base.closes.map((c) => ({ key: c.key, repName: c.repName, priceCents: c.priceCents, service: c.service, location: c.location, ageSec: Number.isFinite(c.closedAtMs) ? Math.round((now - c.closedAtMs) / 1000) : null, sound: resolveTvSound(db, c.repName, c.key) }));
   const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hourCycle: "h23", hour: "numeric", minute: "numeric", second: "numeric" }).formatToParts(new Date(now)).filter((p) => p.type !== "literal").map((p) => [p.type, Number(p.value)]));
   const settings = db.tv.settings, ready = db.sounds.filter((s) => s.tvWav).map((s) => s.id), need = new Set();
   if (settings.defaultSound === "random" || settings.defaultSound === "custom-random") ready.forEach((id) => need.add(id));
   else if (typeof settings.defaultSound === "string" && settings.defaultSound.indexOf("custom:") === 0 && ready.includes(settings.defaultSound.slice(7))) need.add(settings.defaultSound.slice(7));
   db.repSounds.forEach((r) => { if (r.choice.indexOf("custom:") === 0 && ready.includes(r.choice.slice(7))) need.add(r.choice.slice(7)); });
-  return { now: new Date(now).toISOString(), clock: { h: parts.hour || 0, m: parts.minute || 0, s: parts.second || 0 }, volume: TV_VOLUMES[settings.volume] || 70, soundMethod: settings.soundMethod || "auto", confetti: settings.confetti !== false, totals, test: { seq: db.tv.test.seq || 0, sound: db.tv.test.sound }, rows, closes, customSounds: Array.from(need), unreachable: Array.from(new Set([...closing.errors, ...arrival.errors].map((e) => e.locationName))) };
+  return { now: new Date(now).toISOString(), clock: { h: parts.hour || 0, m: parts.minute || 0, s: parts.second || 0 }, volume: TV_VOLUMES[settings.volume] || 70, soundMethod: settings.soundMethod || "auto", confetti: settings.confetti !== false, totals: base.totals, test: { seq: db.tv.test.seq || 0, sound: db.tv.test.sound }, rows, closes, customSounds: Array.from(need), unreachable: base.unreachable, ...(stale ? { stale: true } : {}) };
+}
+// Asking the shops can be slow (a shop that is waking up, or busy). The TV gives up on a refresh after a while, so:
+//  - only ONE round of questions is ever in progress; a second TV request joins it instead of starting another
+//  - if the shops take longer than 7 seconds and we already have an earlier answer, the TV gets that one straight away (marked "stale") while the new one
+//    finishes in the background; the numbers are at most one refresh old and the TV never ends up with an empty board
+//  - how long each round took is remembered, and shown in Settings, so a slow shop can be spotted
+const TV_FEED_WAIT_MS = 7000, TV_FEED_MAX_AGE_MS = 10 * 60 * 1000;
+let tvBaseCache = { at: 0, data: null }, tvBaseBuilding = null;
+const tvFeedStats = { lastMs: null, slowestMs: 0, staleServed: 0, lastAt: null };
+function tvBaseFresh() {
+  if (tvBaseBuilding) return tvBaseBuilding;
+  const t0 = Date.now();
+  tvBaseBuilding = buildTvBase(loadDB()).then((data) => {
+    const ms = Date.now() - t0;
+    tvBaseCache = { at: Date.now(), data };
+    tvFeedStats.lastMs = ms; tvFeedStats.lastAt = new Date().toISOString(); if (ms > tvFeedStats.slowestMs) tvFeedStats.slowestMs = ms;
+    return data;
+  }).finally(() => { tvBaseBuilding = null; });
+  return tvBaseBuilding;
 }
 app.get("/api/tv/feed", tvAuth, async (req, res) => {
   tvLastSeenAt = Date.now();
-  try { res.set("Cache-Control", "no-store"); res.json(await buildTvFeed(loadDB())); } catch (e) { res.status(500).json({ error: "Couldn't build the feed." }); }
+  try {
+    const building = tvBaseFresh(), haveOlder = tvBaseCache.data && Date.now() - tvBaseCache.at < TV_FEED_MAX_AGE_MS;
+    let base = haveOlder ? await Promise.race([building, new Promise((resolve) => setTimeout(() => resolve(null), TV_FEED_WAIT_MS))]) : await building;
+    let stale = false;
+    if (!base) { base = tvBaseCache.data; stale = true; tvFeedStats.staleServed += 1; building.catch(() => {}); }
+    res.set("Cache-Control", "no-store"); res.json(assembleTvFeed(loadDB(), base, stale));
+  } catch (e) {
+    if (tvBaseCache.data) { tvFeedStats.staleServed += 1; res.set("Cache-Control", "no-store"); return res.json(assembleTvFeed(loadDB(), tvBaseCache.data, true)); }
+    res.status(500).json({ error: "Couldn't build the feed." });
+  }
 });
 app.get("/api/tv/sound/:id", tvAuth, (req, res) => {
   const sound = /^[a-f0-9]{16}$/.test(req.params.id) ? loadDB().sounds.find((s) => s.id === req.params.id && s.tvWav) : null;
@@ -621,7 +656,7 @@ app.get("/api/tv/sound/:id", tvAuth, (req, res) => {
 // ---- the owner's side: status, settings, building the app, turning it off ----
 app.get("/api/tv", requireOwner, (req, res) => {
   const db = loadDB();
-  res.json({ hasKey: !!db.tv.keyHash, createdAt: db.tv.createdAt, settings: db.tv.settings, lastSeenAt: tvLastSeenAt ? new Date(tvLastSeenAt).toISOString() : null, reports: db.tv.reports.slice(-12).reverse() });
+  res.json({ hasKey: !!db.tv.keyHash, createdAt: db.tv.createdAt, settings: db.tv.settings, lastSeenAt: tvLastSeenAt ? new Date(tvLastSeenAt).toISOString() : null, reports: db.tv.reports.slice(-12).reverse(), feed: tvFeedStats });
 });
 app.put("/api/tv/settings", requireOwner, (req, res) => {
   const db = loadDB();
