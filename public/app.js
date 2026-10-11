@@ -278,6 +278,89 @@ async function renderSettings(content) {
   }
   loadRepSounds();
 
+  // ---- Rep photos ----
+  content.appendChild(el("div", { class: "muted", style: "margin:24px 0 12px", text: "REP PHOTOS" }));
+  const photosBox = el("div", { class: "card" });
+  content.appendChild(photosBox);
+  const initialsOf = (name) => { const w = String(name).trim().split(/\s+/).filter(Boolean).map((x) => Array.from(x)[0]); return (w.length > 1 ? w[0] + w[w.length - 1] : (w[0] || "?")).toUpperCase(); };
+  // `msg` is shown AFTER the list is redrawn (a message written before the redraw would land on the old, discarded copy)
+  async function loadRepPhotos(msg) {
+    let reps = [], photos = [];
+    try {
+      const r = await api("/api/combined/salesreps"), seen = new Map();
+      r.locations.forEach((l) => (l.salesReps || []).forEach((s) => { const k = repKeyOf(s.name); if (k && !seen.has(k)) seen.set(k, String(s.name).trim().replace(/\s+/g, " ")); }));
+      reps = Array.from(seen.values()).sort((x, y) => x.localeCompare(y));
+    } catch (e) { /* locations unreachable: the list just stays empty */ }
+    try { photos = await api("/api/rep-photos"); } catch (e) { /* none yet */ }
+    while (photosBox.firstChild) photosBox.removeChild(photosBox.firstChild);
+    const note = el("div", { style: "font-size:12.5px;min-height:16px;margin-bottom:10px", class: "muted" });
+    const say = (text, color) => { note.textContent = text; note.style.color = color || "var(--sub)"; };
+    photosBox.appendChild(el("div", { class: "muted", style: "font-size:12.5px;margin-bottom:10px", text: "A photo for each rep, shown in the circle next to their name on the Roku TV (a rep without one shows their initials). Pick a picture, line their face up in the circle, and save. The TV picks up changes within about 15 seconds." }));
+    photosBox.appendChild(note);
+    if (reps.length === 0) photosBox.appendChild(el("div", { class: "muted", text: "No reps found yet. They show up here once your locations are connected and have sales reps." }));
+    reps.forEach((name) => {
+      const mine = photos.find((p) => p.key === repKeyOf(name));
+      const holder = el("div");
+      const fileInput = el("input", { type: "file", accept: "image/*", style: "display:none" });
+      const thumb = mine
+        ? el("img", { src: "/api/rep-photos/" + mine.id, alt: name, style: "width:56px;height:56px;border-radius:50%;object-fit:cover;flex:none" })
+        : el("div", { style: "width:56px;height:56px;border-radius:50%;background:var(--panel);display:flex;align-items:center;justify-content:center;font-weight:600;flex:none", text: initialsOf(name) });
+      const head = el("div", { class: "row", style: "gap:12px;align-items:center" }, [thumb, el("div", { style: "flex:1;font-size:14px", text: name }),
+        el("button", { class: "ghost", text: mine ? "Change" : "Add photo", onclick: () => fileInput.click() })]);
+      if (mine) head.appendChild(el("button", { class: "ghost", text: "Remove", onclick: async () => {
+        if (!confirm(`Remove ${name}'s photo? The TV goes back to showing their initials.`)) return;
+        try { await api("/api/rep-photos?name=" + encodeURIComponent(name), { method: "DELETE" }); await loadRepPhotos({ text: `Removed ${name}'s photo.`, color: "var(--amber)" }); } catch (e) { say(e.message || "Couldn't remove it.", "var(--red)"); }
+      } }));
+      fileInput.addEventListener("change", () => { const f = fileInput.files && fileInput.files[0]; if (f) openPhotoEditor(holder, name, f, say); fileInput.value = ""; });
+      photosBox.appendChild(el("div", { style: "margin-bottom:14px" }, [head, fileInput, holder]));
+    });
+    if (msg) say(msg.text, msg.color);
+  }
+  // The editor: shows the picture in the circle it will have on the TV, with sliders to zoom and move it. The result is cut into a circle and shrunk to a
+  // small PNG here in the browser before it is sent, so what the tracker stores is always tiny.
+  async function openPhotoEditor(holder, name, file, say) {
+    while (holder.firstChild) holder.removeChild(holder.firstChild);
+    if (file.size > 25 * 1024 * 1024) { say("That picture is very large (over 25 MB). Pick a smaller one.", "var(--red)"); return; }
+    let img;
+    try { img = await createImageBitmap(file); } catch (e) {
+      try { img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = URL.createObjectURL(file); }); }
+      catch (e2) { say("This browser couldn't read that picture. Try a JPEG or PNG.", "var(--red)"); return; }
+    }
+    const w = img.width, h = img.height;
+    if (!w || !h || Math.min(w, h) < 64) { say("That picture is too small (it needs to be at least 64 pixels across).", "var(--red)"); return; }
+    say("", "var(--sub)");
+    const state = { zoom: 1, px: 0, py: h > w ? -0.4 : 0 };      // a tall picture starts a little toward the top, where faces usually are
+    const draw = (canvas, N) => {
+      const ctx = canvas.getContext("2d"); ctx.clearRect(0, 0, N, N); ctx.save(); ctx.beginPath(); ctx.arc(N / 2, N / 2, N / 2, 0, Math.PI * 2); ctx.closePath(); ctx.clip();
+      const s = Math.min(w, h) / state.zoom, x0 = (w - s) * (0.5 + state.px / 2), y0 = (h - s) * (0.5 + state.py / 2);
+      ctx.drawImage(img, x0, y0, s, s, 0, 0, N, N); ctx.restore();
+    };
+    const preview = el("canvas", { width: "200", height: "200", style: "width:160px;height:160px;flex:none;border-radius:50%;background:var(--panel)" });
+    draw(preview, 200);
+    const slider = (label, key, min, max) => {
+      const input = el("input", { type: "range", min: String(min), max: String(max), step: "0.01", value: String(state[key]), style: "width:100%", "data-slider": key });
+      input.addEventListener("input", () => { state[key] = Number(input.value); draw(preview, 200); });
+      return el("div", { style: "margin:4px 0" }, [el("div", { class: "muted", style: "font-size:11.5px", text: label }), input]);
+    };
+    const buttons = el("div", { class: "row", style: "gap:8px;margin-top:8px" }, [
+      el("button", { class: "primary", text: "Save photo", onclick: async (ev) => {
+        const btn = ev.currentTarget; btn.disabled = true;
+        try {
+          const out = document.createElement("canvas"); out.width = 168; out.height = 168; draw(out, 168);
+          const blob = await new Promise((res) => out.toBlob(res, "image/png"));
+          if (!blob || blob.size > 280 * 1024) throw new Error("That picture came out too large. Try a simpler one.");
+          const r = await fetch("/api/rep-photos?name=" + encodeURIComponent(name), { method: "PUT", headers: { "Content-Type": "image/png" }, body: blob, credentials: "same-origin" });
+          if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || "Couldn't save the photo."); }
+          await loadRepPhotos({ text: `Saved ✓ ${name}'s photo. The TV picks it up within about 15 seconds.`, color: "var(--green)" });
+        } catch (e) { say(e.message || "Couldn't save the photo.", "var(--red)"); btn.disabled = false; }
+      } }),
+      el("button", { class: "ghost", text: "Cancel", onclick: () => { while (holder.firstChild) holder.removeChild(holder.firstChild); say("", "var(--sub)"); } }),
+    ]);
+    holder.appendChild(el("div", { class: "row", style: "gap:14px;align-items:center;margin-top:10px;flex-wrap:wrap" }, [preview, el("div", { style: "flex:1;min-width:180px" }, [slider("Zoom in", "zoom", 1, 4), slider("Move left or right", "px", -1, 1), slider("Move up or down", "py", -1, 1)])]));
+    holder.appendChild(buttons);
+  }
+  loadRepPhotos();
+
   // ---- Roku TV ----
   content.appendChild(el("div", { class: "muted", style: "margin:24px 0 12px", text: "ROKU TV" }));
   const rokuBox = el("div", { class: "card" });
