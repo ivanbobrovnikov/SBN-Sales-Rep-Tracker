@@ -29,6 +29,9 @@ sub init()
     m.lastSoundAt = 0
     m.state = tv_newState()
     m.have = {}
+    m.havePhoto = {}
+    m.lastRows = invalid
+    m.dlKind = ""
     m.wanted = []
     m.downloading = false
     m.dlId = ""
@@ -194,6 +197,7 @@ sub applyFeed(feed as object)
     if feed.totals <> invalid then showTotals(feed.totals)
     rows = feed.rows
     if rows = invalid then rows = []
+    m.lastRows = rows
     renderRows(rows)
     closes = feed.closes
     if closes = invalid then closes = []
@@ -205,12 +209,28 @@ sub applyFeed(feed as object)
     showNextBanner()
     if feed.customSounds <> invalid
         for each id in feed.customSounds
-            if not m.have.DoesExist(id) and not tv_inList(m.wanted, id) and id <> m.dlId
-                m.wanted.Push(id)
-            end if
+            queueFile("sound", id)
         end for
-        startDownloads()
     end if
+    for each r in rows              ' the reps' photos, top of the board first
+        pid = tv_photoId(r)
+        if pid <> "" then queueFile("photo", pid)
+    end for
+    startDownloads()
+end sub
+
+' Adds a sound or a photo to the list of files to fetch, unless the TV already has it, is already waiting for it, or is fetching it right now.
+sub queueFile(kind as string, id as string)
+    if kind = "photo"
+        if m.havePhoto.DoesExist(id) then return
+    else
+        if m.have.DoesExist(id) then return
+    end if
+    if m.dlKind = kind and m.dlId = id then return
+    for each w in m.wanted
+        if w.kind = kind and w.id = id then return
+    end for
+    m.wanted.Push({ kind: kind, id: id })
 end sub
 
 function tv_inList(list as object, item as string) as boolean
@@ -261,7 +281,11 @@ function rowsSignature(rows as object, now as dynamic) as string
     sig = ""
     for each r in rows
         p = tv_goalPct(r.goal)
-        sig = sig + r.name + "|" + tv_text(r.closedCents) + "|" + tv_text(r.arrivedCount) + "|" + tv_text(r.commissionCents) + "|" + tv_text(r.closeCount) + "|" + p.ToStr() + "|" + tv_arrowFor(m.rankState, r.name, now) + ";"
+        ph = tv_photoId(r)
+        if ph <> ""
+            if m.havePhoto.DoesExist(ph) then ph = ph + "+" else ph = ph + "-"
+        end if
+        sig = sig + ph + "~" + r.name + "|" + tv_text(r.closedCents) + "|" + tv_text(r.arrivedCount) + "|" + tv_text(r.commissionCents) + "|" + tv_text(r.closeCount) + "|" + p.ToStr() + "|" + tv_arrowFor(m.rankState, r.name, now) + ";"
     end for
     return sig
 end function
@@ -371,20 +395,41 @@ sub addRow(i as integer, r as object, y as integer, arrow as string)
         m.rowsGroup.appendChild(a)
     end if
 
-    badge = CreateObject("roSGNode", "Poster")
-    badge.uri = "pkg:/images/circle.png"
-    badge.translation = [226, y + 9]
-    badge.width = 84
-    badge.height = 84
-    badge.loadDisplayMode = "scaleToFit"
-    if r.color <> invalid then badge.blendColor = r.color else badge.blendColor = "0x3B82F6FF"
-    m.rowsGroup.appendChild(badge)
-    ini = r.initials
-    if ini = invalid then ini = "?"
-    initials = makeLabel(226, y + 9, 84, 84, ini, "semibold", 36, "0xFFFFFFFF")
-    initials.horizAlign = "center"
-    initials.vertAlign = "center"
-    m.rowsGroup.appendChild(initials)
+    pid = tv_photoId(r)
+    if pid <> "" and m.havePhoto.DoesExist(pid)
+        ' the rep's own photo (already cut into a circle), in a ring of their color
+        ring = CreateObject("roSGNode", "Poster")
+        ring.uri = "pkg:/images/circle.png"
+        ring.translation = [222, y + 5]
+        ring.width = 92
+        ring.height = 92
+        ring.loadDisplayMode = "scaleToFit"
+        if r.color <> invalid then ring.blendColor = r.color else ring.blendColor = "0x3B82F6FF"
+        m.rowsGroup.appendChild(ring)
+        photo = CreateObject("roSGNode", "Poster")
+        photo.uri = tv_photoPath(pid)
+        photo.translation = [226, y + 9]
+        photo.width = 84
+        photo.height = 84
+        photo.loadDisplayMode = "scaleToFit"
+        m.rowsGroup.appendChild(photo)
+        print "TV> avatar photo " + r.name
+    else
+        badge = CreateObject("roSGNode", "Poster")
+        badge.uri = "pkg:/images/circle.png"
+        badge.translation = [226, y + 9]
+        badge.width = 84
+        badge.height = 84
+        badge.loadDisplayMode = "scaleToFit"
+        if r.color <> invalid then badge.blendColor = r.color else badge.blendColor = "0x3B82F6FF"
+        m.rowsGroup.appendChild(badge)
+        ini = r.initials
+        if ini = invalid then ini = "?"
+        initials = makeLabel(226, y + 9, 84, 84, ini, "semibold", 36, "0xFFFFFFFF")
+        initials.horizAlign = "center"
+        initials.vertAlign = "center"
+        m.rowsGroup.appendChild(initials)
+    end if
 
     hasGoal = (tv_goalPct(r.goal) >= 0)
     if hasGoal
@@ -661,18 +706,25 @@ end sub
 sub startDownloads()
     if m.downloading
         if Uptime(0) - m.dlStarted < 60 then return
-        print "TV> sound download took too long, moving on"
+        print "TV> download took too long, moving on"
         m.downloading = false
     end if
     if m.wanted.Count() = 0 then return
-    m.dlId = m.wanted.Shift()
+    item = m.wanted.Shift()
+    m.dlId = item.id
+    m.dlKind = item.kind
     m.downloading = true
     m.dlStarted = Uptime(0)
     task = CreateObject("roSGNode", "DownloadTask")
     task.observeField("result", "onDownloaded")
-    task.url = m.cfg.server + "/api/tv/sound/" + m.dlId
     task.key = m.cfg.key
-    task.path = "tmp:/tv_" + m.dlId + ".wav"
+    if item.kind = "photo"
+        task.url = m.cfg.server + "/api/tv/photo/" + item.id
+        task.path = tv_photoPath(item.id)
+    else
+        task.url = m.cfg.server + "/api/tv/sound/" + item.id
+        task.path = "tmp:/tv_" + item.id + ".wav"
+    end if
     m.dlTask = task
     task.control = "RUN"
 end sub
@@ -683,12 +735,22 @@ sub onDownloaded(event as object)
     if not task.isSameNode(m.dlTask) then return
     r = event.getData()
     m.downloading = false
-    if r <> invalid and r.ok
-        m.have[m.dlId] = true
-        print "TV> sound ready " + m.dlId
-    else
-        print "TV> sound download failed " + m.dlId
-    end if
+    kind = m.dlKind
+    id = m.dlId
     m.dlId = ""
+    m.dlKind = ""
+    if r <> invalid and r.ok
+        if kind = "photo"
+            m.havePhoto[id] = true
+            print "TV> photo ready " + id
+            m.rowsSig = "(a photo arrived)"          ' so the rows are drawn again, now with the photo
+            if m.lastRows <> invalid then renderRows(m.lastRows)
+        else
+            m.have[id] = true
+            print "TV> sound ready " + id
+        end if
+    else
+        print "TV> " + kind + " download failed " + id
+    end if
     startDownloads()
 end sub
