@@ -393,12 +393,18 @@ async function renderSettings(content) {
     if (window._rokuTimer) { clearInterval(window._rokuTimer); window._rokuTimer = null; }
     if (tv.hasKey) {
       const ago = (iso) => { const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000)); return s < 60 ? `${s} second${s === 1 ? "" : "s"} ago` : s < 3600 ? `${Math.round(s / 60)} minute${Math.round(s / 60) === 1 ? "" : "s"} ago` : `${Math.round(s / 3600)} hour${Math.round(s / 3600) === 1 ? "" : "s"} ago`; };
-      const statusLine = el("div", { style: "font-size:13px;margin:14px 0 6px" });
+      const statusLine = el("div", { style: "font-size:13px;margin:14px 0 2px" });
+      const speedLine = el("div", { style: "font-size:12px;margin:0 0 6px" });
       const reportsBox = el("div", { style: "margin:4px 0 2px" });
       const paintStatus = (st) => {
         const fresh = st.lastSeenAt && Date.now() - Date.parse(st.lastSeenAt) < 45000;
         statusLine.textContent = st.lastSeenAt ? `${fresh ? "●" : "○"} The TV checked in ${ago(st.lastSeenAt)}` : "○ The TV hasn't checked in yet (it checks every 15 seconds once the app is open)";
         statusLine.style.color = fresh ? "var(--green)" : "var(--amber)";
+        // how long your shops are taking to answer (a slow shop is the usual reason a TV shows an empty or old board)
+        const f = st.feed || {}, secs = (ms) => (ms / 1000).toFixed(1) + " s";
+        if (f.lastMs === null || f.lastMs === undefined) { speedLine.textContent = ""; }
+        else if (f.slowestMs >= 6000 || f.staleServed > 0) { speedLine.textContent = `Your shops answered in ${secs(f.lastMs)} last time and in ${secs(f.slowestMs)} at their slowest, so the TV sometimes shows numbers one refresh old. If this stays slow, check which shop is slow.`; speedLine.style.color = "var(--amber)"; }
+        else { speedLine.textContent = `Your shops answered in ${secs(f.lastMs)} last time (slowest ${secs(f.slowestMs)}).`; speedLine.style.color = "var(--sub)"; }
         while (reportsBox.firstChild) reportsBox.removeChild(reportsBox.firstChild);
         if (st.reports && st.reports.length) {
           reportsBox.appendChild(el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.04em;margin-bottom:4px", text: "WHAT THE TV REPORTS (NEWEST FIRST)" }));
@@ -408,6 +414,7 @@ async function renderSettings(content) {
       };
       paintStatus(tv);
       rokuBox.appendChild(statusLine);
+      rokuBox.appendChild(speedLine);
       // which sound to test: any built-in one, or one of your own that is ready for the Roku
       const testSel = el("select", { style: "width:100%;margin:10px 0 8px" });
       Object.entries(DEAL_SOUNDS).forEach(([k, d]) => testSel.appendChild(el("option", { value: k, text: "Test sound: " + d.name })));
