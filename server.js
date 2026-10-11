@@ -32,6 +32,7 @@ function loadDB() {
   if (!db.goals) db.goals = [];
   if (!db.sounds) db.sounds = [];
   if (!db.repSounds) db.repSounds = [];
+  if (!db.repPhotos) db.repPhotos = [];
   if (!db.tv) db.tv = { keyHash: null, createdAt: null, settings: { defaultSound: "random", volume: "medium" } };
   if (!db.tv.settings) db.tv.settings = { defaultSound: "random", volume: "medium" };
   if (!db.tv.settings.soundMethod) db.tv.settings.soundMethod = "auto";
@@ -590,7 +591,8 @@ async function buildTvFeed(db) {
   merged.sort((x, y) => y.closedValue - x.closedValue || y.closeCount - x.closeCount || y.commission - x.commission || x.name.localeCompare(y.name));
   const cents = (n) => Math.round((Number(n) || 0) * 100);
   const goals = await tvGoalProgress(db);
-  const rows = merged.map((r, i) => ({ rank: i + 1, name: r.name, initials: repInitials(r.name), color: repColor(r.name), closedCents: cents(r.closedValue), closeCount: r.closeCount, arrivedCount: r.arrivedCount, commissionCents: cents(r.commission), goal: goals[r.name] || null }));
+  const photoOf = (name) => { const p = (db.repPhotos || []).find((x) => x.key === repKey(name)); return p ? { id: p.id } : null; };
+  const rows = merged.map((r, i) => ({ rank: i + 1, name: r.name, initials: repInitials(r.name), color: repColor(r.name), photo: photoOf(r.name), closedCents: cents(r.closedValue), closeCount: r.closeCount, arrivedCount: r.arrivedCount, commissionCents: cents(r.commission), goal: goals[r.name] || null }));
   const totals = { closedCents: rows.reduce((a, r) => a + r.closedCents, 0), closeCount: rows.reduce((a, r) => a + r.closeCount, 0), arrivedCount: rows.reduce((a, r) => a + r.arrivedCount, 0), commissionCents: rows.reduce((a, r) => a + r.commissionCents, 0) };
   const now = Date.now();
   const closes = closing.perRep.flatMap((r) => r.closes.map((c) => {
@@ -752,9 +754,74 @@ app.put("/api/sounds/:id/tv-wav", requireOwner, express.raw({ type: () => true, 
   res.json({ ok: true, seconds: Math.round(check.seconds * 100) / 100 });
 });
 
+// =====================================================================================================================================
+// REP PHOTOS
+// A picture for each rep, shown in the circle next to their name on the Roku (instead of their initials). The Settings screen crops it into a circle
+// and shrinks it to a small PNG before sending it, so what arrives here is always tiny. A photo is personal, so only the owner and the TV's key can
+// fetch it, and every upload is checked to be a genuine, intact PNG of a sensible size. A rep is matched by name, like their sound.
+// =====================================================================================================================================
+const PHOTOS_DIR = path.join(DATA_DIR, "repphotos");
+const MAX_PHOTO_BYTES = 300 * 1024, MAX_REP_PHOTOS = 100;
+function checkPhotoPng(b) {
+  if (!Buffer.isBuffer(b) || b.length < 70) return { error: "That isn't a picture file." };
+  if (b.toString("hex", 0, 8) !== "89504e470d0a1a0a") return { error: "That isn't a PNG picture." };
+  let pos = 8, width = 0, height = 0, sawIdat = false, sawEnd = false, first = true;
+  while (pos + 12 <= b.length && !sawEnd) {
+    const len = b.readUInt32BE(pos), type = b.toString("latin1", pos + 4, pos + 8);
+    if (len > b.length || pos + 12 + len > b.length) return { error: "That picture is cut short or damaged." };
+    if (b.readUInt32BE(pos + 8 + len) !== crc32(b.subarray(pos + 4, pos + 8 + len))) return { error: "That picture is damaged." };
+    if (first) { if (type !== "IHDR" || len !== 13) return { error: "That picture is damaged." }; width = b.readUInt32BE(pos + 8); height = b.readUInt32BE(pos + 12); first = false; }
+    if (type === "IDAT") sawIdat = true;
+    if (type === "IEND") sawEnd = true;
+    pos += 12 + len;
+  }
+  if (!sawIdat || !sawEnd || pos !== b.length) return { error: "That picture is cut short or damaged." };
+  if (width !== height || width < 64 || width > 512) return { error: "The picture must be square, between 64 and 512 pixels." };
+  return { width };
+}
+const photoFile = (id) => path.join(PHOTOS_DIR, `${id}.png`);
+app.get("/api/rep-photos", requireOwner, (req, res) => {
+  res.json(loadDB().repPhotos.map((p) => ({ key: p.key, name: p.name, id: p.id, at: p.at })));
+});
+app.get("/api/rep-photos/:id", requireOwner, (req, res) => {
+  const ok = /^[a-f0-9]{16}$/.test(req.params.id) && loadDB().repPhotos.some((p) => p.id === req.params.id) && fs.existsSync(photoFile(req.params.id));
+  if (!ok) return res.status(404).json({ error: "Photo not found." });
+  res.set({ "Content-Type": "image/png", "X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=3600" });
+  res.send(fs.readFileSync(photoFile(req.params.id)));
+});
+app.put("/api/rep-photos", requireOwner, express.raw({ type: () => true, limit: MAX_PHOTO_BYTES }), (req, res) => {
+  const display = repDisplayName(req.query.name), key = repKey(display);
+  if (!key) return res.status(400).json({ error: "Choose a rep." });
+  const check = checkPhotoPng(req.body);
+  if (check.error) return res.status(400).json({ error: check.error });
+  const db = loadDB();
+  const existing = db.repPhotos.find((p) => p.key === key);
+  if (!existing && db.repPhotos.length >= MAX_REP_PHOTOS) return res.status(400).json({ error: "That's too many reps with photos." });
+  const id = crypto.randomBytes(8).toString("hex");
+  try { fs.mkdirSync(PHOTOS_DIR, { recursive: true }); fs.writeFileSync(photoFile(id), req.body); } catch (e) { return res.status(500).json({ error: "Couldn't save that on the server." }); }
+  if (existing) { try { fs.unlinkSync(photoFile(existing.id)); } catch (e) { /* already gone */ } existing.id = id; existing.name = display; existing.at = new Date().toISOString(); }
+  else db.repPhotos.push({ key, name: display, id, at: new Date().toISOString() });
+  saveDB(db);
+  res.json({ ok: true, id });
+});
+app.delete("/api/rep-photos", requireOwner, (req, res) => {
+  const key = repKey(repDisplayName(req.query.name));
+  const db = loadDB(), existing = db.repPhotos.find((p) => p.key === key);
+  if (existing) { try { fs.unlinkSync(photoFile(existing.id)); } catch (e) { /* already gone */ } db.repPhotos = db.repPhotos.filter((p) => p.key !== key); saveDB(db); }
+  res.json({ ok: true });
+});
+// the TV fetches a rep's photo with its key
+app.get("/api/tv/photo/:id", tvAuth, (req, res) => {
+  const ok = /^[a-f0-9]{16}$/.test(req.params.id) && loadDB().repPhotos.some((p) => p.id === req.params.id) && fs.existsSync(photoFile(req.params.id));
+  if (!ok) return res.status(404).json({ error: "Photo not found." });
+  res.set({ "Content-Type": "image/png", "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store" });
+  res.send(fs.readFileSync(photoFile(req.params.id)));
+});
+
 // A file over the size limit gets a plain-English answer instead of an error page.
 app.use((err, req, res, next) => {
   if (err && err.type === "entity.too.large" && req.path.indexOf("/api/sounds") === 0) return res.status(413).json({ error: "That file is too big. Keep it under 3 MB." });
+  if (err && err.type === "entity.too.large" && req.path.indexOf("/api/rep-photos") === 0) return res.status(413).json({ error: "That picture is too big (the limit is 300 KB; the screen shrinks pictures for you, so this is unexpected)." });
   next(err);
 });
 
