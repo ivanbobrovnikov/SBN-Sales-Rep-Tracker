@@ -206,3 +206,17 @@ function tv_goalText(goal as dynamic) as string
     if goal.metric = "commission" then kind = " commission"
     return label + kind + "   " + tv_money(goal.current) + " of " + tv_money(goal.target)
 end function
+
+' ---- rep photos ----
+' the id of a rep's photo ("" if they have none)
+function tv_photoId(r as dynamic) as string
+    if r = invalid then return ""
+    p = r.photo
+    if p = invalid then return ""
+    if p.id = invalid then return ""
+    return tv_text(p.id)
+end function
+
+function tv_photoPath(id as string) as string
+    return "tmp:/photo_" + id + ".png"
+end function
