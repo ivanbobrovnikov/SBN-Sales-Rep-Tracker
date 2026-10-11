@@ -679,7 +679,7 @@ const crc32 = (buf) => { let c = 0xffffffff; for (let i = 0; i < buf.length; i++
 function makeZip(files) {
   const parts = [], central = []; let offset = 0;
   files.forEach((f) => {
-    const name = Buffer.from(f.name, "utf8"), raw = f.data, packed = zlib.deflateRawSync(raw), useDeflate = packed.length < raw.length, body = useDeflate ? packed : raw, method = useDeflate ? 8 : 0, crc = crc32(raw);
+    const name = Buffer.from(f.name, "utf8"), raw = f.data, packed = zlib.deflateRawSync(raw), useDeflate = !f.store && packed.length < raw.length, body = useDeflate ? packed : raw, method = useDeflate ? 8 : 0, crc = crc32(raw);
     const local = Buffer.alloc(30); local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(0x0800, 6); local.writeUInt16LE(method, 8); local.writeUInt16LE(0, 10); local.writeUInt16LE(0x5a21, 12); local.writeUInt32LE(crc, 14); local.writeUInt32LE(body.length, 18); local.writeUInt32LE(raw.length, 22); local.writeUInt16LE(name.length, 26); local.writeUInt16LE(0, 28);
     parts.push(local, name, body);
     const c = Buffer.alloc(46); c.writeUInt32LE(0x02014b50, 0); c.writeUInt16LE(20, 4); c.writeUInt16LE(20, 6); c.writeUInt16LE(0x0800, 8); c.writeUInt16LE(method, 10); c.writeUInt16LE(0, 12); c.writeUInt16LE(0x5a21, 14); c.writeUInt32LE(crc, 16); c.writeUInt32LE(body.length, 20); c.writeUInt32LE(raw.length, 24); c.writeUInt16LE(name.length, 28); c.writeUInt32LE(offset, 42);
@@ -705,6 +705,16 @@ app.post("/api/tv/package", requireOwner, (req, res) => {
   const files = rokuFiles(ROKU_DIR, "");
   files.sort((x, y) => (x.name === "manifest" ? -1 : y.name === "manifest" ? 1 : x.name < y.name ? -1 : 1));
   files.push({ name: "config.json", data: config });
+  // The sounds go in UNCOMPRESSED (the Roku reads them straight out of the package), and the app gets a list of what each sound file should be (its size and checksums), so on the TV it can check every file and report if one is damaged.
+  const check = {};
+  files.filter((f) => /^sounds\/[a-z]+\.wav$/.test(f.name)).forEach((f) => {
+    f.store = true;
+    let sum16 = 0, head = 0;                                   // the total of every 16th byte (enough to catch scrambled or shifted data without making a TV add up every byte) and of the 44-byte header
+    for (let i = 0; i < f.data.length; i += 16) sum16 += f.data[i];
+    for (let i = 0; i < 44 && i < f.data.length; i++) head += f.data[i];
+    check[f.name.slice(7, -4)] = { size: f.data.length, sum16, head };
+  });
+  files.push({ name: "sounds/check.json", data: Buffer.from(JSON.stringify(check)) });
   db.tv.keyHash = sha256(key); db.tv.createdAt = new Date().toISOString();
   saveDB(db);
   res.set({ "Content-Type": "application/zip", "Content-Disposition": 'attachment; filename="SBN-Leaderboard-Roku.zip"', "Cache-Control": "no-store" });
