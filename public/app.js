@@ -16,6 +16,7 @@ const REP_NAV_ICONS = {
   "audit": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6"/></svg>`,
   "leaderboard": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 4h8v5a4 4 0 0 1-8 0z"/><path d="M8 6H5a1 1 0 0 0-1 1c0 2.2 1.6 3.6 4 4M16 6h3a1 1 0 0 1 1 1c0 2.2-1.6 3.6-4 4M12 13v4M8 20h8M10 17h4"/></svg>`,
   "cleanup": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z"/><path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8z"/></svg>`,
+  "find": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>`,
   "settings": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.2M12 18.8V21M3 12h2.2M18.8 12H21M5.6 5.6l1.6 1.6M16.8 16.8l1.6 1.6M18.4 5.6l-1.6 1.6M7.2 16.8l-1.6 1.6"/></svg>`,
 };
 // bottom-bar icon: a clean line icon, falling back to the old emoji for a tab that has none
@@ -82,6 +83,8 @@ function render() {
     return;
   }
 
+  if (session.role === "team") { renderTeam(app); return; }          // the sales team only ever sees Find
+
   if (currentTab === "leaderboard") {
     renderLeaderboard(app);
     return;
@@ -96,7 +99,7 @@ function render() {
   renderPage(content);
 
   const bar = el("div", { class: "bottom-tabs" });
-  [["combined", "Combined", "📊"], ["audit", "Audit", "🧾"], ["leaderboard", "Leaderboard", "🏆"], ["cleanup", "Cleanup", "🧹"], ["settings", "Settings", "⚙️"]].forEach(([key, label, icon]) => {
+  [["combined", "Combined", "📊"], ["find", "Find", "🔎"], ["audit", "Audit", "🧾"], ["leaderboard", "Leaderboard", "🏆"], ["cleanup", "Cleanup", "🧹"], ["settings", "Settings", "⚙️"]].forEach(([key, label, icon]) => {
     bar.appendChild(el("button", {
       class: "bottom-tab" + (currentTab === key ? " active" : ""),
       onclick: () => { currentTab = key; render(); },
@@ -109,17 +112,129 @@ function render() {
 }
 
 
+// ---------- Find an appointment and add an upsell (the sales team's whole screen; the owner has it as a tab too) ----------
+const REP_NAME_KEY = "repName";
+const whenText = (iso) => { const d = new Date(iso); return isNaN(d) ? "" : d.toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); };
+const STATUS_LABEL = { pending: "Booked", arrived: "Arrived", no_show: "No-show", unconfirmed: "Unconfirmed" };
+async function renderFind(content) {
+  let repName = localStorage.getItem(REP_NAME_KEY) || "", reps = [], locations = [], locationId = "", timer = null, seq = 0;
+  const chip = (text, color) => el("span", { class: "rchip", style: color ? `color:${color};border-color:${color}` : "", text });
+  const flash = el("div", { style: "font-size:14px;margin:0 0 10px;min-height:0" });
+  const say = (text, color) => { flash.textContent = text; flash.style.color = color || "var(--sub)"; flash.style.padding = text ? "10px 12px" : "0"; flash.style.border = text ? "0.5px solid " + (color || "var(--border)") : "0"; flash.style.borderRadius = "10px"; clearTimeout(say.t); if (text) say.t = setTimeout(() => say(""), 9000); };
+  const nameSel = el("select", { "aria-label": "Your name" });
+  const fillNames = () => { nameSel.innerHTML = ""; const o0 = el("option", { value: "", text: "Choose your name" }); nameSel.appendChild(o0); reps.forEach((n) => { const o = el("option", { value: n, text: n }); if (n === repName) o.selected = true; nameSel.appendChild(o); }); if (!repName) o0.selected = true; };
+  nameSel.addEventListener("change", () => { repName = nameSel.value; localStorage.setItem(REP_NAME_KEY, repName); loadMine(); runSearch(); });
+  content.appendChild(el("div", { class: "card" }, [el("div", { class: "field", style: "margin:0" }, [el("label", { text: "Who are you?" }), nameSel])]));
+  const mineBox = el("div");
+  async function loadMine() {
+    mineBox.innerHTML = "";
+    if (!repName) return;
+    try {
+      const d = await api("/api/rep/my-upsells?name=" + encodeURIComponent(repName));
+      if (!d.upsells.length) { mineBox.appendChild(el("div", { class: "card" }, [el("div", { class: "muted", text: "You haven't added an upsell yet today." })])); return; }
+      const card = el("div", { class: "card", "data-part": "mine" }, [el("div", { class: "row" }, [el("div", { style: "font-weight:500", text: `Your upsells today (${d.upsells.length})` }), el("div", { class: "mono", style: "color:var(--green);font-weight:600;font-size:20px", text: money(d.total) })])]);
+      d.upsells.forEach((u) => {
+        const undo = u.canUndo ? el("button", { class: "ghost", "data-act": "undo", style: "font-size:12px;padding:5px 12px", text: "Undo", onclick: async () => {
+          if (!confirm(`Remove the ${u.name} upsell (${money(u.price)})?`)) return;
+          try { await api("/api/rep/upsell/undo", { method: "POST", body: JSON.stringify({ locationId: u.locationId, saleId: u.saleId, upsellId: u.upsellId, addedBy: repName }) }); say("Removed.", "var(--sub)"); await loadMine(); runSearch(); } catch (e) { say(e.message, "var(--red)"); }
+        } }) : null;
+        card.appendChild(el("div", { class: "row", style: "padding:9px 0 0;border-top:0.5px solid var(--border);margin-top:9px;align-items:flex-start" }, [el("div", { style: "min-width:0" }, [el("div", { style: "font-size:14.5px", text: `${u.name} · ${money(u.price)}` }), el("div", { class: "muted", style: "font-size:12px", text: `${u.car} · ${u.customerName} · ${u.locationName}` })]), undo]));
+      });
+      mineBox.appendChild(card);
+    } catch (e) { /* the list is a nicety, never in the way */ }
+  }
+  const q = el("input", { type: "search", placeholder: "Customer name, car or phone number", "aria-label": "Search appointments", autocomplete: "off" });
+  const chips = el("div", { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:10px" });
+  const results = el("div");
+  const drawChips = () => { chips.innerHTML = ""; [{ id: "", name: "All shops" }, ...locations].forEach((l) => chips.appendChild(el("button", { class: "tab-btn" + (locationId === l.id ? " active" : ""), "data-loc": l.name, style: "padding:7px 13px", text: l.name, onclick: () => { locationId = l.id; drawChips(); runSearch(); } }))); };
+  async function runSearch() {
+    const term = q.value.trim(), my = ++seq;
+    results.innerHTML = "";
+    if (term.length < 2) { results.appendChild(el("div", { class: "muted", style: "padding:6px 2px", text: "Type at least 2 letters of the customer's name, the car, or part of their phone number." })); return; }
+    results.appendChild(el("div", { class: "muted", style: "padding:6px 2px", text: "Searching all shops…" }));
+    let d; try { d = await api(`/api/rep/search?q=${encodeURIComponent(term)}${locationId ? "&locationId=" + encodeURIComponent(locationId) : ""}`); } catch (e) { if (my === seq) { results.innerHTML = ""; results.appendChild(el("div", { class: "notice err", text: e.message })); } return; }
+    if (my !== seq) return;
+    results.innerHTML = "";
+    d.locations.filter((l) => l.problem).forEach((l) => results.appendChild(el("div", { class: "notice", style: "color:var(--warn);margin:0 0 8px", "data-part": "problem", text: l.problem + " Its appointments aren't in these results." })));
+    if (!d.results.length) { results.appendChild(el("div", { class: "card" }, [el("div", { class: "muted", text: "No appointment found. Check the spelling, or try the car or the last digits of the phone number." })])); return; }
+    d.results.forEach((a) => results.appendChild(resultCard(a)));
+  }
+  function resultCard(a) {
+    const statusColor = a.status === "arrived" ? "var(--green)" : a.status === "no_show" ? "var(--red)" : "";
+    const card = el("div", { class: "card", "data-part": "result", "data-id": a.id }, [
+      el("div", { class: "row", style: "align-items:flex-start;gap:10px" }, [el("div", { style: "min-width:0" }, [el("div", { style: "font-weight:500;line-height:1.3", text: a.car }), el("div", { class: "muted", style: "font-size:13px;margin-top:2px", text: `${a.customerName || "No name"} · ${whenText(a.date)}${a.baseService ? " · " + a.baseService : ""}` })]), chip(STATUS_LABEL[a.status] || a.status, statusColor)]),
+      el("div", { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:8px" }, [chip(a.locationName, "var(--cyan)"), chip(a.salesRepName ? "Rep: " + a.salesRepName : a.isOnlineBooking ? "Online booking, no rep" : a.isWalkIn ? "Walk-in" : "No rep")]),
+    ]);
+    (a.upsells || []).forEach((u) => card.appendChild(el("div", { class: "muted", style: "font-size:12.5px;margin-top:7px", "data-part": "upsell", text: `Upsell: ${u.name} · ${money(u.price)} · ${u.creditedTo}` })));
+    const formBox = el("div");
+    const toggle = el("button", { class: "ghost", "data-act": "add", style: "margin-top:10px;font-size:13px;padding:8px 14px", text: "+ Add upsell", onclick: () => { if (formBox.firstChild) { formBox.innerHTML = ""; toggle.textContent = "+ Add upsell"; return; } toggle.textContent = "Close"; formBox.appendChild(buildForm(a)); } });
+    card.appendChild(toggle); card.appendChild(formBox);
+    return card;
+  }
+  function buildForm(a) {
+    const nameIn = el("input", { placeholder: "What was upsold? e.g. Ceramic coating", maxlength: "60", "aria-label": "What was upsold" });
+    const priceIn = el("input", { type: "number", placeholder: "Price", inputmode: "decimal", step: "0.01", min: "0", "aria-label": "Upsell price" });
+    const credit = el("select", { "aria-label": "Credit to" });
+    reps.forEach((n) => { const o = el("option", { value: n, text: n }); if (n === repName) o.selected = true; credit.appendChild(o); });
+    const note = el("div", { style: "font-size:13px;min-height:18px;margin-top:6px" });
+    const btn = el("button", { class: "primary", "data-act": "submit", style: "margin-top:8px;width:100%", text: "Add upsell" });
+    [nameIn, priceIn, credit].forEach((x) => x.addEventListener("input", () => { note.textContent = ""; }));      // a message about a mistake goes away as soon as they start fixing it
+    btn.addEventListener("click", async () => {
+      note.textContent = ""; const nm = nameIn.value.trim(), pr = parseFloat(priceIn.value);
+      const bad = !repName ? "Choose your name at the top first." : !nm ? "Say what was upsold." : !(pr > 0) ? "Enter the upsell's price." : "";
+      if (bad) { note.style.color = "var(--red)"; note.textContent = bad; return; }
+      btn.disabled = true;
+      try {
+        const d = await api("/api/rep/upsell", { method: "POST", body: JSON.stringify({ locationId: a.locationId, saleId: a.id, name: nm, price: pr, creditName: credit.value || repName, addedBy: repName }) });
+        say(`Added: ${nm} ${money(pr)}, credited to ${d.upsell.creditedTo}, on ${a.customerName || a.car} (${a.locationName}).`, "var(--green)");
+        await loadMine(); await runSearch();
+      } catch (e) { note.style.color = "var(--red)"; note.textContent = e.message; btn.disabled = false; }
+    });
+    return el("div", { style: "margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border)", "data-part": "form" }, [
+      el("div", { class: "field" }, [el("label", { text: "What was upsold" }), nameIn]), el("div", { class: "field" }, [el("label", { text: "Price" }), priceIn]),
+      el("div", { class: "field", style: "margin-bottom:0" }, [el("label", { text: "Credit to" }), credit]), note, btn]);
+  }
+  q.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(runSearch, 300); });
+  content.appendChild(flash); content.appendChild(mineBox);
+  content.appendChild(el("div", { class: "card" }, [el("div", { class: "field", style: "margin:0" }, [el("label", { text: "Find the appointment" }), q]), chips]));
+  content.appendChild(results);
+  try { reps = (await api("/api/rep/reps")).reps; locations = await api("/api/rep/locations"); } catch (e) { /* the search still works without them */ }
+  fillNames(); drawChips(); loadMine(); runSearch();
+}
+// The sales team's screen: just a title, a log out button, and Find.
+function renderTeam(app) {
+  app.appendChild(el("div", { class: "header" }, [el("div", { class: "title oswald", style: "flex:1", text: "SBN Sales Team" }), el("button", { class: "ghost", "data-act": "logout", text: "Log out", onclick: async () => { await api("/api/logout", { method: "POST" }); await boot(); } })]));
+  const content = el("div"); app.appendChild(content); renderFind(content);
+}
+// Settings card: the owner turns on a separate password for the sales team.
+async function renderTeamAccessCard(content) {
+  const card = el("div", { class: "card", "data-part": "team-access" }); content.appendChild(card);
+  async function draw(msg, ok) {
+    card.innerHTML = ""; let on = false; try { on = (await api("/api/team-access")).enabled; } catch (e) { /* shown as off */ }
+    const pw = el("input", { type: "password", placeholder: on ? "New team password (signs everyone out)" : "Choose a team password (6+ characters)", autocomplete: "new-password", "aria-label": "Team password" });
+    const note = el("div", { class: "notice " + (ok ? "ok" : "err"), text: msg || "" });
+    card.appendChild(el("div", { class: "row" }, [el("div", { style: "font-weight:500", text: "Sales team access" }), el("span", { class: "rchip", style: on ? "color:var(--green);border-color:var(--green)" : "", text: on ? "On" : "Off" })]));
+    card.appendChild(el("div", { class: "muted", style: "margin:6px 0 10px", text: "Reps sign in with this password and can only search appointments and add upsells. They can't see pay, the audit, the leaderboard settings or anything else." }));
+    card.appendChild(el("div", { class: "field" }, [pw]));
+    card.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [
+      el("button", { class: "primary", "data-act": "team-set", style: "padding:10px 18px", text: on ? "Change team password" : "Turn on", onclick: async () => { try { await api("/api/team-access", { method: "POST", body: JSON.stringify({ password: pw.value }) }); await draw(on ? "Changed. Everyone signed in with the old one is signed out." : "On. Give your reps the address and this password.", true); } catch (e) { await draw(e.message, false); } } }),
+      on ? el("button", { class: "ghost", "data-act": "team-off", text: "Turn off", onclick: async () => { if (!confirm("Turn off sales team access? Everyone signed in will be signed out.")) return; await api("/api/team-access", { method: "DELETE" }); await draw("Off.", true); } }) : null,
+    ].filter(Boolean)));
+    card.appendChild(note);
+  }
+  await draw();
+}
+
 function renderLogin(app) {
   const wrap = el("div", { style: "max-width:340px;margin:80px auto;padding:0 16px" });
-  wrap.appendChild(el("div", { class: "title oswald", style: "margin-bottom:20px;text-align:center", text: "SBN Combined Rep Tracker" }));
+  wrap.appendChild(el("div", { class: "title oswald", style: "margin-bottom:20px;text-align:center", text: "SBN Rep Tracker" }));
   const passInput = el("input", { type: "password", placeholder: session.needsSetup ? "Create a password" : "Password" });
   const notice = el("div", { class: "notice" });
   const submit = async () => {
     try {
       if (session.needsSetup) await api("/api/setup/owner-password", { method: "POST", body: JSON.stringify({ password: passInput.value }) });
       else await api("/api/login", { method: "POST", body: JSON.stringify({ password: passInput.value }) });
-      session.loggedIn = true;
-      render();
+      await boot();                                   // ask the server who just signed in (the owner or the sales team), then draw the right screens
     } catch (e) {
       notice.textContent = e.message;
       notice.style.color = "var(--red)";
@@ -136,6 +251,7 @@ function renderLogin(app) {
 }
 
 function renderPage(content) {
+  if (currentTab === "find") return renderFind(content);
   if (currentTab === "combined") return renderCombined(content);
   if (currentTab === "audit") return renderAudit(content);
   if (currentTab === "cleanup") return renderCleanup(content);
@@ -143,6 +259,7 @@ function renderPage(content) {
 }
 
 async function renderSettings(content) {
+  renderTeamAccessCard(content);
   const list = el("div", { style: "margin-bottom:16px" });
   async function loadList() {
     const locs = await api("/api/locations");
@@ -1259,9 +1376,9 @@ async function renderAudit(content) {
 
   function renderRow(c) {
     const slot = el("div");
-    const statusColor = c.status === "arrived" ? "var(--green)" : c.status === "no_show" ? "var(--red)" : "var(--sub)";
-    const commText = c.status === "arrived" ? `+${money(c.commissionAmount)} earned` : c.status === "no_show" ? "no-show, earns nothing" : c.status === "cancelled" ? "cancelled" : `${money(c.commissionAmount)} if it shows`;
-    const editBtn = el("button", { class: "ghost", style: "font-size:11px;padding:3px 9px", text: "Edit", onclick: () => {
+    const statusColor = c.isUpsell ? "var(--cyan)" : c.status === "arrived" ? "var(--green)" : c.status === "no_show" ? "var(--red)" : "var(--sub)";
+    const commText = c.isUpsell ? "upsell: counts on the leaderboard, no commission" : c.status === "arrived" ? `+${money(c.commissionAmount)} earned` : c.status === "no_show" ? "no-show, earns nothing" : c.status === "cancelled" ? "cancelled" : `${money(c.commissionAmount)} if it shows`;
+    const editBtn = c.isUpsell ? null : el("button", { class: "ghost", style: "font-size:11px;padding:3px 9px", text: "Edit", onclick: () => {
       if (slot.firstChild) { slot.innerHTML = ""; return; }
       buildEditor(c, slot);
     } });
