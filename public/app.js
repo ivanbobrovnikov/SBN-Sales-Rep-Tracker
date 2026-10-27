@@ -5,11 +5,25 @@
   style.id = "banner-css";
   style.textContent = `/* "Deal closed!" announcement on the leaderboard TV */
 @keyframes dealSlide { from { transform: translateY(-120%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-.deal-banner { margin: 16px auto 0; max-width: 920px; padding: 18px 28px; border-radius: 16px; text-align: center; color: #fff;
-  background: linear-gradient(90deg, #1b7a3c, #2fbf5f); font-size: 30px; font-weight: 600; letter-spacing: 0.01em;
+.deal-banner { margin: 16px auto 0; max-width: 920px; padding: 18px 28px; border-radius: 16px; text-align: center;
+  background: linear-gradient(90deg, #2FC585, #7CF0BE); color: #06122B; font-size: 30px; font-weight: 600; letter-spacing: 0.01em;
   box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5); animation: dealSlide 0.45s ease-out; }`;
   document.head.appendChild(style);
 })();
+
+const REP_NAV_ICONS = {
+  "combined": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>`,
+  "audit": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6"/></svg>`,
+  "leaderboard": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 4h8v5a4 4 0 0 1-8 0z"/><path d="M8 6H5a1 1 0 0 0-1 1c0 2.2 1.6 3.6 4 4M16 6h3a1 1 0 0 1 1 1c0 2.2-1.6 3.6-4 4M12 13v4M8 20h8M10 17h4"/></svg>`,
+  "cleanup": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z"/><path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8z"/></svg>`,
+  "settings": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.2M12 18.8V21M3 12h2.2M18.8 12H21M5.6 5.6l1.6 1.6M16.8 16.8l1.6 1.6M18.4 5.6l-1.6 1.6M7.2 16.8l-1.6 1.6"/></svg>`,
+};
+// bottom-bar icon: a clean line icon, falling back to the old emoji for a tab that has none
+function tabIcon(key, fallback) {
+  const d = el("div", { class: "tab-icon" });
+  if (REP_NAV_ICONS[key]) d.innerHTML = REP_NAV_ICONS[key]; else d.textContent = fallback || "\u2022";
+  return d;
+}
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -87,12 +101,13 @@ function render() {
       class: "bottom-tab" + (currentTab === key ? " active" : ""),
       onclick: () => { currentTab = key; render(); },
     }, [
-      el("div", { class: "tab-icon", text: icon }),
+      tabIcon(key, icon),
       el("div", { text: label }),
     ]));
   });
   document.body.appendChild(bar);
 }
+
 
 function renderLogin(app) {
   const wrap = el("div", { style: "max-width:340px;margin:80px auto;padding:0 16px" });
@@ -1945,18 +1960,18 @@ async function renderLeaderboard(app) {
     ranked.forEach((rep, i) => {
       const medal = medalFor(i);
       list.appendChild(el("div", {
-        style: `display:flex;align-items:center;gap:24px;padding:20px 24px;margin-bottom:12px;background:${i === 0 ? "var(--cardAlt)" : "var(--card)"};border:0.5px solid ${i === 0 ? "var(--amber)" : "var(--border)"};border-radius:14px`,
+        style: `display:flex;flex-wrap:wrap;align-items:center;gap:12px 24px;padding:20px 24px;margin-bottom:12px;background:${i === 0 ? "var(--cardAlt)" : "var(--card)"};border:0.5px solid ${i === 0 ? "var(--amber)" : "var(--border)"};border-radius:14px`,
       }, [
         el("div", { class: "mono", style: "font-size:32px;font-weight:600;color:var(--muted);width:56px;text-align:center", text: medal || `#${i + 1}` }),
-        el("div", { style: "flex:1", }, [
+        el("div", { style: "flex:1 1 120px;min-width:0", }, [
           el("div", { class: "oswald", style: "font-size:26px;font-weight:600;color:var(--text)", text: rep.name }),
         ]),
-        el("div", { style: "text-align:center;width:180px;border-right:1px solid var(--border);padding-right:20px" }, [
+        el("div", { style: "text-align:center;width:180px;max-width:100%;border-right:1px solid var(--border);padding-right:20px" }, [
           el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.03em", text: "CLOSING TODAY" }),
           el("div", { class: "mono", style: "font-size:24px;font-weight:600;color:var(--cyan);margin-top:2px", text: money(rep.closedValue) }),
           el("div", { class: "mono", style: "font-size:15px;color:var(--chrome)", text: `${rep.closeCount} deal${rep.closeCount !== 1 ? "s" : ""}` }),
         ]),
-        el("div", { style: "text-align:right;width:200px" }, [
+        el("div", { style: "text-align:right;width:200px;max-width:100%" }, [
           el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.03em", text: "ARRIVED TODAY" }),
           el("div", { class: "mono", style: "font-size:24px;font-weight:600;color:var(--amber);margin-top:2px", text: `${rep.arrivedCount}` }),
           el("div", { class: "mono", style: "font-size:18px;font-weight:600;color:var(--green)", text: money(rep.actualCommission) }),
