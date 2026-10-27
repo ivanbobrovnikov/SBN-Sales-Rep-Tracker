@@ -5,6 +5,7 @@ const fs = require("fs");
 const path = require("path");
 
 const app = express();
+app.set("trust proxy", 1);                  // behind the host's proxy, so a sign-in attempt is counted against the real visitor, not the proxy
 app.use(express.json());
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, "public")));
@@ -50,30 +51,50 @@ function saveDB(db) {
 let sessionsValidAfter = 0;
 try { sessionsValidAfter = Number(loadDB().sessionsValidAfter) || 0; } catch (e) { sessionsValidAfter = 0; }
 
-// ---------- Auth: single owner password, no roles - this tool is owner-only ----------
-function signSession() {
-  const payload = JSON.stringify({ role: "owner", ts: Date.now() });
+// ---------- Auth: the owner password opens everything. A separate SALES TEAM password (set by the owner in Settings) opens only the Find-and-upsell screen. ----------
+function signSession(role) {
+  const payload = JSON.stringify({ role: role === "team" ? "team" : "owner", ts: Date.now() });
   const sig = crypto.createHmac("sha256", SESSION_SECRET).update(payload).digest("hex");
   return Buffer.from(payload).toString("base64") + "." + sig;
 }
-function verifySession(token) {
-  if (!token) return false;
+// "owner", "team", or null. Older logins (made before roles existed) are owner logins.
+function sessionRole(token) {
+  if (!token || typeof token !== "string") return null;
   const [payloadB64, sig] = token.split(".");
-  if (!payloadB64 || !sig) return false;
+  if (!payloadB64 || !sig) return null;
   const payload = Buffer.from(payloadB64, "base64").toString("utf8");
   const expectedSig = crypto.createHmac("sha256", SESSION_SECRET).update(payload).digest("hex");
-  if (sig !== expectedSig) return false;
-  if (sessionsValidAfter > 0) { try { if (!(JSON.parse(payload).ts >= sessionsValidAfter)) return false; } catch (e) { return false; } }
-  return true;
+  if (sig !== expectedSig) return null;
+  let p; try { p = JSON.parse(payload); } catch (e) { return null; }
+  if (sessionsValidAfter > 0 && !(p.ts >= sessionsValidAfter)) return null;
+  if (p.role === "team") {
+    const db = loadDB();
+    if (!db.teamPassword || !(p.ts >= (db.teamValidAfter || 0)) || Date.now() - p.ts > 30 * 86400000) return null;      // team logins last 30 days, and stop when that password is changed or turned off
+    return "team";
+  }
+  return "owner";
 }
+function verifySession(token) { return sessionRole(token) === "owner"; }
 function requireOwner(req, res, next) {
-  if (!verifySession(req.cookies.session)) return res.status(401).json({ error: "Not logged in." });
+  const role = sessionRole(req.cookies.session);
+  if (!role) return res.status(401).json({ error: "Not logged in." });
+  if (role !== "owner") return res.status(403).json({ error: "That's for the owner only." });
   next();
 }
+function requireTeam(req, res, next) {
+  const role = sessionRole(req.cookies.session);
+  if (!role) return res.status(401).json({ error: "Not logged in." });
+  req.role = role; next();
+}
+const teamHash = (pw, salt) => { salt = salt || crypto.randomBytes(16).toString("hex"); return { salt, hash: crypto.scryptSync(String(pw), salt, 64).toString("hex") }; };
+const teamOk = (pw, rec) => { if (!rec || typeof pw !== "string") return false; const a = Buffer.from(teamHash(pw, rec.salt).hash, "hex"), b = Buffer.from(rec.hash, "hex"); return a.length === b.length && crypto.timingSafeEqual(a, b); };
+const loginTries = new Map(), MAX_TRIES = 8, TRY_WINDOW = 15 * 60 * 1000;      // too many wrong passwords from one place: wait 15 minutes
+const tooManyTries = (ip) => { const t = (loginTries.get(ip) || []).filter((x) => Date.now() - x < TRY_WINDOW); loginTries.set(ip, t); return t.length >= MAX_TRIES; };
 
 app.get("/api/session", (req, res) => {
   const db = loadDB();
-  res.json({ loggedIn: verifySession(req.cookies.session), needsSetup: !db.ownerPasswordHash });
+  const role = sessionRole(req.cookies.session);
+  res.json({ loggedIn: !!role, role, needsSetup: !db.ownerPasswordHash });
 });
 
 app.post("/api/setup/owner-password", (req, res) => {
@@ -88,11 +109,21 @@ app.post("/api/setup/owner-password", (req, res) => {
 });
 
 app.post("/api/login", (req, res) => {
-  const db = loadDB();
-  const { password } = req.body;
-  if (!db.ownerPasswordHash || hash(password) !== db.ownerPasswordHash) return res.status(401).json({ error: "Wrong password." });
-  res.cookie("session", signSession(), { httpOnly: true, maxAge: 365 * 24 * 60 * 60 * 1000, sameSite: "lax" });
-  res.json({ ok: true });
+  const db = loadDB(), ip = req.ip;
+  if (tooManyTries(ip)) return res.status(429).json({ error: "Too many wrong tries. Wait 15 minutes and try again." });
+  const { password } = req.body || {};
+  if (db.ownerPasswordHash && hash(password) === db.ownerPasswordHash) {
+    loginTries.delete(ip);
+    res.cookie("session", signSession("owner"), { httpOnly: true, maxAge: 365 * 24 * 60 * 60 * 1000, sameSite: "lax" });
+    return res.json({ ok: true, role: "owner" });
+  }
+  if (db.teamPassword && teamOk(password, db.teamPassword)) {
+    loginTries.delete(ip);
+    res.cookie("session", signSession("team"), { httpOnly: true, maxAge: 30 * 24 * 60 * 60 * 1000, sameSite: "lax" });
+    return res.json({ ok: true, role: "team" });
+  }
+  const t = loginTries.get(ip) || []; t.push(Date.now()); loginTries.set(ip, t);
+  res.status(401).json({ error: "Wrong password." });
 });
 
 app.post("/api/logout", (req, res) => {
@@ -197,7 +228,7 @@ async function buildCombinedStats(db, query) {
     const closes = rep.closes;
     const arrived = closes.filter((c) => c.status === "arrived");
     const noShow = closes.filter((c) => c.status === "no_show");
-    const pending = closes.filter((c) => c.status !== "arrived" && c.status !== "no_show");
+    const pending = closes.filter((c) => c.status !== "arrived" && c.status !== "no_show" && !c.isUpsell);
     const closedValue = closes.reduce((a, c) => a + c.basePrice, 0);
     const avgDealSize = closes.length ? closedValue / closes.length : 0;
     const duringHoursCount = closes.filter((c) => c.duringHours).length;
@@ -213,7 +244,7 @@ async function buildCombinedStats(db, query) {
     };
     let actualCommission = 0, projectedCommission = 0;
     closes.forEach((c) => {
-      const rate = rateFor(c.locationId, c.duringHours);
+      const rate = c.isUpsell ? 0 : rateFor(c.locationId, c.duringHours);      // an upsell counts toward closed value and deals, never commission
       const amt = c.basePrice * (rate / 100);
       c.commissionAmount = amt; // attached per-close so the frontend never has to approximate when filtering to one location
       projectedCommission += amt;
@@ -858,6 +889,65 @@ app.use((err, req, res, next) => {
   if (err && err.type === "entity.too.large" && req.path.indexOf("/api/sounds") === 0) return res.status(413).json({ error: "That file is too big. Keep it under 3 MB." });
   if (err && err.type === "entity.too.large" && req.path.indexOf("/api/rep-photos") === 0) return res.status(413).json({ error: "That picture is too big (the limit is 300 KB; the screen shrinks pictures for you, so this is unexpected)." });
   next(err);
+});
+
+// ---------- Sales team access (owner sets it) ----------
+app.get("/api/team-access", requireOwner, (req, res) => res.json({ enabled: !!loadDB().teamPassword }));
+app.post("/api/team-access", requireOwner, (req, res) => {
+  const db = loadDB(), pw = String((req.body || {}).password || "");
+  if (pw.length < 6) return res.status(400).json({ error: "Use at least 6 characters." });
+  if (db.ownerPasswordHash && hash(pw) === db.ownerPasswordHash) return res.status(400).json({ error: "That's the owner password. The sales team needs its own." });
+  db.teamPassword = teamHash(pw); db.teamValidAfter = Date.now(); saveDB(db);               // anyone signed in with the old team password is signed out
+  res.json({ ok: true });
+});
+app.delete("/api/team-access", requireOwner, (req, res) => { const db = loadDB(); db.teamPassword = null; db.teamValidAfter = Date.now(); saveDB(db); res.json({ ok: true }); });
+
+// ---------- Find an appointment and add an upsell (owner or sales team). Reads and writes go to the shop that owns the appointment. ----------
+async function askShop(loc, pathAndQuery, method, body) {
+  try {
+    const r = await fetch(loc.url + pathAndQuery, { method: method || "GET", headers: { "Content-Type": "application/json", "X-Cross-Secret": loc.secret }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(12000) });
+    let data = null; try { data = await r.json(); } catch (e) { /* not json */ }
+    if (data === null && (r.status === 404 || r.ok)) return { needsUpdate: true };            // an older tracker that doesn't know this route yet
+    return { status: r.status, ok: r.ok, data };
+  } catch (e) { return { error: e.name === "TimeoutError" ? "No answer after 12 seconds." : (e.message || "Unreachable") }; }
+}
+const shopProblem = (loc, r) => r.needsUpdate ? `${loc.name} needs the latest tracker update before this works there.` : r.error ? `Couldn't reach ${loc.name} (${r.error}).` : r.status === 401 ? `${loc.name} refused the secret. Check it in Settings.` : null;
+app.get("/api/rep/locations", requireTeam, (req, res) => res.json(loadDB().locations.map((l) => ({ id: l.id, name: l.name }))));
+app.get("/api/rep/reps", requireTeam, async (req, res) => {
+  const db = loadDB(), names = new Map();
+  await Promise.all(db.locations.map(async (loc) => { const r = await askShop(loc, `/api/cross-location/salesreps?secret=${encodeURIComponent(loc.secret)}`); if (r.ok && r.data) (r.data.salesReps || []).forEach((x) => names.set(String(x.name).trim().toLowerCase(), String(x.name).trim())); }));
+  res.json({ reps: [...names.values()].sort((a, b) => a.localeCompare(b)) });
+});
+app.get("/api/rep/search", requireTeam, async (req, res) => {
+  const db = loadDB(), q = String(req.query.q || "").trim().slice(0, 80), locationId = String(req.query.locationId || "");
+  if (q.length < 2) return res.json({ results: [], locations: [] });
+  const locs = db.locations.filter((l) => !locationId || l.id === locationId), results = [], statuses = [];
+  await Promise.all(locs.map(async (loc) => {
+    const r = await askShop(loc, `/api/cross-location/appointments-search?q=${encodeURIComponent(q)}`), problem = shopProblem(loc, r);
+    if (problem || !r.ok) { statuses.push({ locationId: loc.id, locationName: loc.name, problem: problem || (r.data && r.data.error) || `Error ${r.status}` }); return; }
+    statuses.push({ locationId: loc.id, locationName: loc.name, problem: null });
+    (r.data.results || []).forEach((a) => results.push({ ...a, locationId: loc.id, locationName: loc.name }));
+  }));
+  results.sort((a, b) => Math.abs(Date.parse(a.date) - Date.now()) - Math.abs(Date.parse(b.date) - Date.now()));
+  res.json({ results: results.slice(0, 40), locations: statuses.sort((a, b) => a.locationName.localeCompare(b.locationName)) });
+});
+async function forwardToShop(req, res, shopPath) {
+  const db = loadDB(), b = req.body || {}, loc = db.locations.find((l) => l.id === b.locationId);
+  if (!loc) return res.status(404).json({ error: "That location isn't set up here." });
+  const who = String(b.addedBy || "").trim().slice(0, 60);
+  if (!who) return res.status(400).json({ error: "Choose your name first." });
+  const r = await askShop(loc, shopPath, "POST", { saleId: b.saleId, upsellId: b.upsellId, name: b.name, price: b.price, creditName: String(b.creditName || who).trim(), addedBy: who }), problem = shopProblem(loc, r);
+  if (problem) return res.status(502).json({ error: problem });
+  res.status(r.status).json(r.data || { error: `Error ${r.status}` });
+}
+app.post("/api/rep/upsell", requireTeam, (req, res) => forwardToShop(req, res, "/api/cross-location/rep-upsell"));
+app.post("/api/rep/upsell/undo", requireTeam, (req, res) => forwardToShop(req, res, "/api/cross-location/rep-upsell/undo"));
+app.get("/api/rep/my-upsells", requireTeam, async (req, res) => {
+  const db = loadDB(), name = String(req.query.name || "").trim().slice(0, 60), out = [];
+  if (!name) return res.json({ upsells: [], total: 0 });
+  await Promise.all(db.locations.map(async (loc) => { const r = await askShop(loc, `/api/cross-location/rep-upsells?name=${encodeURIComponent(name)}&addedBy=${encodeURIComponent(name)}`); if (r.ok && r.data) (r.data.upsells || []).forEach((u) => out.push({ ...u, locationId: loc.id, locationName: loc.name })); }));
+  out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  res.json({ upsells: out, total: Math.round(out.reduce((t, u) => t + (Number(u.price) || 0), 0) * 100) / 100 });
 });
 
 app.listen(PORT, () => console.log(`Combined rep tracker running on port ${PORT}`));
