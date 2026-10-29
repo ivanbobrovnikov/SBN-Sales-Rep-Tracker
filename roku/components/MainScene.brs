@@ -61,6 +61,27 @@ sub init()
     m.reportQueue = []
     m.checkTask = invalid
     m.reporting = false
+    ' the display settings (layout, rotation, photos, ...): what the TV remembers is used until the tracker answers, and the tracker has the final say
+    m.stageGroup = m.top.findNode("stage")
+    m.menuGroup = m.top.findNode("menuGroup")
+    m.rotateTimer = m.top.findNode("rotateTimer")
+    m.sendTimer = m.top.findNode("displaySendTimer")
+    m.logoNode = m.top.findNode("logo")
+    m.display = tv_cleanDisplay(loadDisplay())
+    m.currentLayout = m.display.layout
+    m.menuOpen = false
+    m.menuSel = 0
+    m.tick = 0
+    m.secs = 0
+    m.lastFeed = invalid
+    m.localChangeAt = -100
+    m.pending = {}
+    m.displayTasks = []
+    m.confettiOn = m.display.confetti
+    m.volume = tv_menuVolume(m.display.volume)
+    m.rotateTimer.observeField("fire", "onRotate")
+    m.sendTimer.observeField("fire", "flushDisplay")
+    m.top.setFocus(true)
     m.pollTimer.observeField("fire", "pollNow")
     m.clockTimer.observeField("fire", "tickClock")
     m.bannerTimer.observeField("fire", "bannerDone")
@@ -168,6 +189,8 @@ sub onFeed(event as object)
 end sub
 
 sub applyFeed(feed as object)
+    m.lastFeed = feed
+    if feed.display <> invalid then applyServerDisplay(feed.display)
     if feed.clock <> invalid
         m.clockBase = feed.clock.h * 3600 + feed.clock.m * 60 + feed.clock.s
         m.clockAt = Uptime(0)
@@ -198,7 +221,7 @@ sub applyFeed(feed as object)
     rows = feed.rows
     if rows = invalid then rows = []
     m.lastRows = rows
-    renderRows(rows)
+    drawBoard()
     closes = feed.closes
     if closes = invalid then closes = []
     print "TV> feed ok rows=" + rows.Count().ToStr() + " closes=" + closes.Count().ToStr()
@@ -241,6 +264,11 @@ function tv_inList(list as object, item as string) as boolean
 end function
 
 sub tickClock()
+    m.secs = m.secs + 1
+    if m.secs mod 60 = 0
+        m.tick = m.tick + 1
+        if m.currentLayout = "ambient" and m.lastFeed <> invalid and not m.menuOpen then drawStage()      ' the ambient board drifts a few pixels each minute
+    end if
     if m.clockBase = invalid then return
     elapsed = Int(Uptime(0) - m.clockAt)
     m.clockLabel.text = tv_clockText(m.clockBase, elapsed)
@@ -396,7 +424,7 @@ sub addRow(i as integer, r as object, y as integer, arrow as string)
     end if
 
     pid = tv_photoId(r)
-    if pid <> "" and m.havePhoto.DoesExist(pid)
+    if pid <> "" and m.display.photos and m.havePhoto.DoesExist(pid)
         ' the rep's own photo (already cut into a circle), in a ring of their color
         ring = CreateObject("roSGNode", "Poster")
         ring.uri = "pkg:/images/circle.png"
@@ -466,7 +494,7 @@ sub addRow(i as integer, r as object, y as integer, arrow as string)
 
     m.rowsGroup.appendChild(makeLabel(1440, y + 6, 340, 26, "ARRIVED TODAY", "semibold", 20, "0x8393B2FF"))
     m.rowsGroup.appendChild(makeLabel(1440, y + 15, 340, 70, r.arrivedCount.ToStr(), "bold", 50, "0xF2F5FBFF"))
-    m.rowsGroup.appendChild(makeLabel(1440, y + 74, 340, 28, tv_money(r.commissionCents) + " commission", "semibold", 22, "0x5BD68AFF"))
+    if m.display.commission then m.rowsGroup.appendChild(makeLabel(1440, y + 74, 340, 28, tv_money(r.commissionCents) + " commission", "semibold", 22, "0x5BD68AFF"))
 end sub
 
 function rankColor(i as integer) as string
@@ -514,7 +542,7 @@ sub showNextBanner()
         m.top.findNode("bannerTop").text = "SOUND TEST"
         m.top.findNode("bannerMain").text = "Playing a test sound..."
         m.top.findNode("bannerSub").text = "If you hear nothing, check the TV volume, then look at ROKU TV in the tracker's Settings"
-        m.banner.visible = true
+        m.banner.visible = m.display.banner
         startConfetti()
         print "TV> banner SOUND TEST"
         playSound(c.sound, "test")
@@ -531,7 +559,7 @@ sub showNextBanner()
     end if
     if more > 0 then detail = detail + "   (+" + more.ToStr() + " more)"
     m.top.findNode("bannerSub").text = detail
-    m.banner.visible = true
+    m.banner.visible = m.display.banner
     startConfetti()
     print "TV> banner " + c.repName + " " + tv_money(c.priceCents)
     playSound(c.sound, c.repName)
@@ -545,6 +573,10 @@ sub bannerDone()
 end sub
 
 sub playSound(sound as dynamic, label as string)
+    if m.display.sound = false
+        print "TV> sound is off in the menu"
+        return
+    end if
     path = tv_soundPath(sound, m.have)
     if path = ""
         print "TV> silent"
@@ -754,3 +786,229 @@ sub onDownloaded(event as object)
     end if
     startDownloads()
 end sub
+
+
+' ====================================================================================== LAYOUTS, THE DISPLAY MENU AND THE REMOTE
+function loadDisplay() as dynamic
+    sec = CreateObject("roRegistrySection", "sbn_display")
+    if sec.Exists("d") then return ParseJson(sec.Read("d"))
+    return invalid
+end function
+
+sub saveDisplay()
+    sec = CreateObject("roRegistrySection", "sbn_display")
+    sec.Write("d", FormatJson(m.display))
+    sec.Flush()
+end sub
+
+function tv_menuVolume(name as string) as integer
+    if name = "low" then return 40
+    if name = "high" then return 100
+    return 70
+end function
+
+sub clearGroup(g as object)
+    n = g.getChildCount()
+    if n > 0 then g.removeChildrenIndex(n, 0)
+end sub
+
+' turns a list of things to draw (see layouts.brs) into real nodes
+sub buildItems(group as object, items as object)
+    for each it in items
+        if it.t = "r"
+            n = CreateObject("roSGNode", "Rectangle")
+            n.translation = [it.x, it.y]
+            n.width = it.w
+            n.height = it.h
+            n.color = it.c
+            group.appendChild(n)
+        else if it.t = "p"
+            n = CreateObject("roSGNode", "Poster")
+            n.uri = it.u
+            n.translation = [it.x, it.y]
+            n.width = it.w
+            n.height = it.h
+            n.loadDisplayMode = "scaleToFit"
+            if it.b <> invalid and it.b <> "" then n.blendColor = it.b
+            group.appendChild(n)
+        else if it.t = "l"
+            n = makeLabel(it.x, it.y, it.w, it.h, it.s, it.wt, it.sz, it.c)
+            n.horizAlign = it.al
+            n.vertAlign = it.va
+            group.appendChild(n)
+        end if
+    end for
+end sub
+
+' the Classic board is drawn by the scene's own nodes; every other layout is drawn into the stage
+sub applyLayoutChrome()
+    classic = (m.currentLayout = "classic")
+    for each id in ["title", "subtitle", "accent", "rows", "tile0panel", "tile0bar", "tile0cap", "tile0amt", "tile0sub", "tile1panel", "tile1bar", "tile1cap", "tile1amt", "tile1sub"]
+        n = m.top.findNode(id)
+        if n <> invalid then n.visible = classic
+    end for
+    showTile2 = classic and m.display.commission
+    for each id in ["tile2panel", "tile2bar", "tile2cap", "tile2amt", "tile2sub"]
+        n = m.top.findNode(id)
+        if n <> invalid then n.visible = showTile2
+    end for
+    if not classic then m.emptyLabel.visible = false
+    m.stageGroup.visible = not classic
+end sub
+
+sub drawBoard()
+    if m.lastFeed = invalid then return
+    applyLayoutChrome()
+    if m.currentLayout = "classic"
+        m.logoNode.opacity = 1.0
+        m.clockLabel.color = "0xA9BBDCFF"
+        rows = m.lastFeed.rows
+        if rows = invalid then rows = []
+        renderRows(rows)
+    else
+        drawStage()
+    end if
+end sub
+
+sub drawStage()
+    if m.lastFeed = invalid then return
+    st = tv_stage(m.currentLayout, m.lastFeed, m.display, m.havePhoto, m.tick)
+    clearGroup(m.stageGroup)
+    buildItems(m.stageGroup, st.items)
+    if st.dim
+        m.logoNode.opacity = 0.4
+        m.clockLabel.color = "0x5A6A8CFF"
+    else
+        m.logoNode.opacity = 1.0
+        m.clockLabel.color = "0xA9BBDCFF"
+    end if
+end sub
+
+sub setLayout(id as string)
+    m.currentLayout = id
+    if id = "classic" then m.rowsSig = "(nothing drawn yet)"      ' the classic rows were not kept up to date while hidden: draw them again
+    drawBoard()
+end sub
+
+' ---- rotation ----
+sub startRotation()
+    m.rotateTimer.control = "stop"
+    if m.display.rotate and m.display.layouts.Count() > 1
+        m.rotateTimer.duration = m.display.rotateSeconds
+        m.rotateTimer.control = "start"
+    else if m.currentLayout <> m.display.layout
+        setLayout(m.display.layout)
+    end if
+end sub
+
+sub onRotate()
+    if m.menuOpen then return
+    if not m.display.rotate then return
+    setLayout(tv_rotateNext(m.display, m.currentLayout))
+end sub
+
+' ---- settings coming from the tracker (a change made on the phone) ----
+sub applyServerDisplay(raw as object)
+    if m.menuOpen then return
+    if Uptime(0) - m.localChangeAt < 20 then return       ' a change just made here is still on its way to the tracker: don't let an older answer undo it
+    nd = tv_cleanDisplay(raw)
+    changed = tv_changed(m.display, nd)
+    if changed.Count() = 0 then return
+    m.display = nd
+    saveDisplay()
+    onDisplayChanged(changed)
+end sub
+
+sub onDisplayChanged(changed as object)
+    if changed.confetti <> invalid then m.confettiOn = m.display.confetti
+    if changed.volume <> invalid then m.volume = tv_menuVolume(m.display.volume)
+    if changed.photos <> invalid or changed.commission <> invalid or changed.textSize <> invalid then m.rowsSig = "(nothing drawn yet)"
+    if changed.layout <> invalid
+        setLayout(m.display.layout)
+    else
+        drawBoard()
+    end if
+    if changed.rotate <> invalid or changed.rotateSeconds <> invalid or changed.layouts <> invalid or changed.layout <> invalid then startRotation()
+end sub
+
+' ---- changes made with the remote ----
+sub changeDisplay(nd as object)
+    changed = tv_changed(m.display, nd)
+    if changed.Count() = 0 then return
+    m.display = nd
+    saveDisplay()
+    m.localChangeAt = Uptime(0)
+    for each k in changed
+        m.pending[k] = changed[k]
+    end for
+    m.sendTimer.control = "stop"
+    m.sendTimer.control = "start"
+    onDisplayChanged(changed)
+end sub
+
+' a short pause after the last key press, then everything that changed goes to the tracker in one message
+sub flushDisplay()
+    if m.cfg = invalid then return
+    if m.pending.Count() = 0 then return
+    task = CreateObject("roSGNode", "ReportTask")
+    task.observeField("result", "onDisplaySent")
+    task.url = m.cfg.server + "/api/tv/display"
+    task.key = m.cfg.key
+    task.body = FormatJson(m.pending)
+    m.pending = {}
+    m.displayTasks.Push(task)
+    if m.displayTasks.Count() > 6 then m.displayTasks.Shift()
+    task.control = "RUN"
+    print "TV> display settings sent"
+end sub
+
+sub onDisplaySent(event as object)
+    r = event.getData()
+    if r <> invalid and r.ok = false then print "TV> the tracker did not take the display settings"
+end sub
+
+' ---- the menu ----
+sub openMenu()
+    m.menuOpen = true
+    m.menuSel = 0
+    m.menuGroup.visible = true
+    drawMenu()
+end sub
+
+sub closeMenu()
+    m.menuOpen = false
+    m.menuGroup.visible = false
+    clearGroup(m.menuGroup)
+end sub
+
+sub drawMenu()
+    clearGroup(m.menuGroup)
+    buildItems(m.menuGroup, tv_menuStage(m.display, m.menuSel))
+end sub
+
+' the remote: * opens and closes the menu; while it is open the arrows move through it, OK selects and Back closes it
+function onKeyEvent(key as string, press as boolean) as boolean
+    if not press then return false
+    if key = "options"
+        if m.menuOpen then closeMenu() else openMenu()
+        return true
+    end if
+    if not m.menuOpen then return false
+    rows = tv_menuRows(m.display)
+    if key = "up"
+        m.menuSel = tv_menuMove(m.menuSel, -1, rows.Count())
+    else if key = "down"
+        m.menuSel = tv_menuMove(m.menuSel, 1, rows.Count())
+    else if key = "left"
+        changeDisplay(tv_menuChange(m.display, rows[m.menuSel].key, -1))
+    else if key = "right"
+        changeDisplay(tv_menuChange(m.display, rows[m.menuSel].key, 1))
+    else if key = "OK"
+        changeDisplay(tv_menuAction(m.display, rows[m.menuSel].key))
+    else if key = "back"
+        closeMenu()
+        return true
+    end if
+    drawMenu()
+    return true
+end function

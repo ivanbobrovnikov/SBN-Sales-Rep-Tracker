@@ -2,9 +2,12 @@
 <component name="MainScene" extends="Scene">
   <script type="text/brightscript" uri="pkg:/components/MainScene.brs" />
   <script type="text/brightscript" uri="pkg:/source/logic.brs" />
+  <script type="text/brightscript" uri="pkg:/source/layouts.brs" />
+  <script type="text/brightscript" uri="pkg:/source/menu.brs" />
   <children>
     <Rectangle id="bg" color="0x070D1CFF" width="1920" height="1080" translation="[0,0]" />
     <Rectangle id="headerBand" color="0x0C1730FF" width="1920" height="186" translation="[0,0]" />
+    <Group id="stage" translation="[0,0]" visible="false" />
     <Poster id="logo" uri="pkg:/images/logo_tv.png" translation="[100,40]" width="340" height="104" loadDisplayMode="scaleToFit" />
     <Label id="title" text="TODAY'S LEADERBOARD" color="0xF2F5FBFF" translation="[480,30]" width="900" height="84" />
     <Label id="subtitle" text="All locations combined  -  ranked by total value closed today" font="font:SmallSystemFont" color="0x8393B2FF" translation="[484,116]" width="1000" height="40" />
@@ -35,8 +38,9 @@
       <Label id="bannerSub" text="" color="0xE3FFEEFF" translation="[0,132]" width="1600" height="50" horizAlign="center" />
     </Group>
     <Label id="status" text="" font="font:SmallSystemFont" color="0xFFB454FF" translation="[100,1036]" width="900" height="36" />
-    <Label id="version" text="v1.2" font="font:SmallestSystemFont" color="0x3F4D69FF" translation="[1760,1052]" width="60" height="26" horizAlign="right" />
+    <Label id="version" text="v1.3" font="font:SmallestSystemFont" color="0x3F4D69FF" translation="[1760,1052]" width="60" height="26" horizAlign="right" />
     <Label id="diag" text="" font="font:SmallestSystemFont" color="0x6F7C96FF" translation="[1000,1042]" width="820" height="30" horizAlign="right" />
+    <Group id="menuGroup" translation="[0,0]" visible="false" />
     <Animation id="confettiAnim" duration="3.4" repeat="false" easeFunction="linear">
       <Vector2DFieldInterpolator id="confettiInterp" fieldToInterp="confetti.translation" key="[0.0, 1.0]" keyValue="[[0.0, -1080.0], [0.0, 0.0]]" />
     </Animation>
@@ -47,5 +51,7 @@
     <Timer id="soundTimer" repeat="false" duration="4" />
     <Timer id="countTimer" repeat="true" duration="0.05" />
     <Timer id="confettiTimer" repeat="false" duration="3.6" />
+    <Timer id="rotateTimer" repeat="true" duration="30" />
+    <Timer id="displaySendTimer" repeat="false" duration="1.2" />
   </children>
 </component>
