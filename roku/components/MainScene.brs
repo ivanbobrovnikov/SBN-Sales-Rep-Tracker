@@ -114,6 +114,7 @@ sub init()
     osText = ""
     if osv <> invalid then osText = tv_text(osv.major) + "." + tv_text(osv.minor) + " build " + tv_text(osv.build)
     report("started", "SBN Leaderboard 1.2 on " + tv_text(di.GetModelDisplayName()) + " (" + tv_text(di.GetModel()) + ") Roku OS " + osText)
+    copyBuiltinSounds()
     checkSounds()
     pollNow()
 end sub
@@ -1012,3 +1013,35 @@ function onKeyEvent(key as string, press as boolean) as boolean
     drawMenu()
     return true
 end function
+
+
+' ---- the built-in sounds: copied out of the app package into temporary storage, and played from there ----
+function fileBytes(path as string) as integer
+    ba = CreateObject("roByteArray")
+    if not ba.ReadFile(path) then return -1
+    return ba.Count()
+end function
+
+sub copyBuiltinSounds()
+    keys = ["chaching", "airhorn", "kazoo", "boing", "party", "duck"]
+    good = 0
+    bad = ""
+    for each k in keys
+        src = "pkg:/sounds/" + k + ".wav"
+        dst = "tmp:/b_" + k + ".wav"
+        if CopyFile(src, dst)
+            want = fileBytes(src)
+            got = fileBytes(dst)
+            if want > 0 and got = want
+                m.have["b_" + k] = true
+                good = good + 1
+            else
+                bad = bad + k + " (the copy is " + got.ToStr() + " bytes, should be " + want.ToStr() + ") "
+            end if
+        else
+            bad = bad + k + " (could not be copied) "
+        end if
+    end for
+    print "TV> built-in sounds copied: " + good.ToStr() + " of " + keys.Count().ToStr()
+    report("sounds_copied", good.ToStr() + " of " + keys.Count().ToStr() + " built-in sounds copied to temporary storage and will play from there. " + bad)
+end sub
