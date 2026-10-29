@@ -665,6 +665,21 @@ async function renderSettings(content) {
     const saveSetting = async (body) => { try { await api("/api/tv/settings", { method: "PUT", body: JSON.stringify(body) }); say("Saved ✓", "var(--green)"); } catch (e) { loadRoku({ text: e.message || "Not saved.", color: "var(--red)" }); } };
     sel.addEventListener("change", () => saveSetting({ defaultSound: sel.value }));
     vol.addEventListener("change", () => saveSetting({ volume: vol.value }));
+    // what the TV shows: one set of options, shared with the menu on the TV itself (press * on the remote)
+    const LAYOUT_NAMES = { classic: "Classic board", podium: "Podium", race: "Race to the goal", scoreboard: "Scoreboard", spotlight: "Spotlight", rings: "Goal rings", feed: "Live feed", cards: "The team", ambient: "Ambient (dim, top three)" };
+    const dsp = tv.display || {}, saveDisplay = (d) => saveSetting({ display: d });
+    const pick = (key, choices) => { const s = el("select", { "data-field": "tv-" + key, style: "width:100%;margin-bottom:8px" }, choices.map(([v, t]) => opt(String(v), t))); s.value = String(dsp[key]); s.addEventListener("change", () => saveDisplay({ [key]: typeof choices[0][0] === "number" ? Number(s.value) : s.value })); return s; };
+    const yesNo = (key, label) => { const s = el("select", { "data-field": "tv-" + key, style: "width:100%;margin-bottom:8px" }, [opt("on", label + ": on"), opt("off", label + ": off")]); s.value = dsp[key] === false ? "off" : "on"; s.addEventListener("change", () => saveDisplay({ [key]: s.value === "on" })); return s; };
+    rokuBox.appendChild(el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.04em;margin:14px 0 4px", text: "WHAT THE TV SHOWS" }));
+    rokuBox.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: "Pick the layout, or let the TV rotate through the ones you tick. You can change all of this from the TV too: press the * button on the Roku remote." }));
+    rokuBox.appendChild(pick("layout", Object.entries(LAYOUT_NAMES)));
+    rokuBox.appendChild(yesNo("rotate", "Rotate between layouts"));
+    rokuBox.appendChild(pick("rotateSeconds", [[15, "Rotate every 15 seconds"], [30, "Rotate every 30 seconds"], [60, "Rotate every minute"], [120, "Rotate every 2 minutes"]]));
+    const inRot = new Set(dsp.layouts || Object.keys(LAYOUT_NAMES)), boxes = el("div", { "data-field": "tv-layouts", style: "display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;margin-bottom:10px" });
+    Object.entries(LAYOUT_NAMES).forEach(([id, name]) => { const cb = el("input", { type: "checkbox", "data-layout": id }); cb.checked = inRot.has(id); cb.addEventListener("change", () => { const list = Array.from(boxes.querySelectorAll("input")).filter((x) => x.checked).map((x) => x.getAttribute("data-layout")); if (!list.length) { cb.checked = true; say("Keep at least one layout in the rotation.", "var(--red)"); return; } saveDisplay({ layouts: list }); }); boxes.appendChild(el("label", { style: "display:flex;gap:8px;align-items:center;font-size:13px" }, [cb, el("span", { text: name })])); });
+    rokuBox.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:4px", text: "In the rotation:" })); rokuBox.appendChild(boxes);
+    rokuBox.appendChild(yesNo("photos", "Rep photos")); rokuBox.appendChild(yesNo("commission", "Show commission")); rokuBox.appendChild(yesNo("banner", "Deal closed banner")); rokuBox.appendChild(yesNo("sound", "Sound"));
+    rokuBox.appendChild(pick("textSize", [["normal", "Text size: normal"], ["large", "Text size: large"]]));
     rokuBox.appendChild(el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.04em;margin:14px 0 4px", text: "SOUND ON THE TV" }));
     rokuBox.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: "Reps with their own sound (see REP SOUNDS above) get theirs. Everyone else gets this. Off keeps the TV silent." }));
     rokuBox.appendChild(sel); rokuBox.appendChild(vol);
