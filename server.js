@@ -983,18 +983,19 @@ async function vaRows(db, kind) {
 }
 const callInfo = (rec) => (rec ? { attempts: rec.attempts, lastAt: rec.lastAt, lastBy: rec.by, outcome: rec.outcome, note: rec.note || "", callbackAt: rec.callbackAt || null } : null);
 app.get("/api/va/dead", requireVA, async (req, res) => {
-  const { rows, problems } = await vaRows(loadDB(), "dead"), db = loadDB(), calls = (db.vaCalls = db.vaCalls || {}), now = Date.now(), out = []; let later = 0, changed = false;
+  const { rows, problems } = await vaRows(loadDB(), "dead"), db = loadDB(), calls = (db.vaCalls = db.vaCalls || {}), now = Date.now(), out = []; let later = 0, laterValue = 0, changed = false;
   rows.forEach((r) => {
     const rec = calls[vaKey(r.locationId, r.saleId, "dead")] || null;
     // The customer booked again. If the VA had been calling them it counts as a save (the new booking's price is the money won back); if they came back on their own it isn't the VA's, and it leaves the list.
     if (r.rebooked) { if (rec && rec.attempts > 0 && rec.outcome !== "rebooked") { Object.assign(rec, { outcome: "rebooked", auto: true, savedValue: r.rebooked.price || r.price, savedAt: new Date().toISOString() }); changed = true; } return; }
     if (rec && (rec.outcome === "rebooked" || rec.outcome === "not_interested")) return;
-    if (rec && rec.outcome === "callback" && rec.callbackAt && Date.parse(rec.callbackAt) > now) { later++; return; }
+    if (rec && rec.outcome === "callback" && rec.callbackAt && Date.parse(rec.callbackAt) > now) { later++; laterValue += r.price || 0; return; }
     out.push({ ...r, call: callInfo(rec) });
   });
   if (changed) saveDB(db);
   out.sort((a, b) => (((a.call || {}).attempts || 0) - ((b.call || {}).attempts || 0)) || (a.date < b.date ? 1 : -1));
-  res.json({ rows: out, later, problems });
+  const sum = (list) => Math.round(list.reduce((t, r) => t + (r.price || 0), 0) * 100) / 100;
+  res.json({ rows: out, later, laterValue: laterValue, problems, value: sum(out), noShowValue: sum(out.filter((r) => r.status === "no_show")), cancelledValue: sum(out.filter((r) => r.status !== "no_show")) });
 });
 app.get("/api/va/tomorrow", requireVA, async (req, res) => {
   const { rows, problems } = await vaRows(loadDB(), "tomorrow"), calls = loadDB().vaCalls || {};
