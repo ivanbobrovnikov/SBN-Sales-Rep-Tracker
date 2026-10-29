@@ -656,7 +656,7 @@ function assembleTvFeed(db, base, stale) {
   if (settings.defaultSound === "random" || settings.defaultSound === "custom-random") ready.forEach((id) => need.add(id));
   else if (typeof settings.defaultSound === "string" && settings.defaultSound.indexOf("custom:") === 0 && ready.includes(settings.defaultSound.slice(7))) need.add(settings.defaultSound.slice(7));
   db.repSounds.forEach((r) => { if (r.choice.indexOf("custom:") === 0 && ready.includes(r.choice.slice(7))) need.add(r.choice.slice(7)); });
-  return { now: new Date(now).toISOString(), clock: { h: parts.hour || 0, m: parts.minute || 0, s: parts.second || 0 }, volume: TV_VOLUMES[settings.volume] || 70, soundMethod: settings.soundMethod || "auto", confetti: settings.confetti !== false, totals: base.totals, test: { seq: db.tv.test.seq || 0, sound: db.tv.test.sound }, rows, closes, customSounds: Array.from(need), unreachable: base.unreachable, ...(stale ? { stale: true } : {}) };
+  return { now: new Date(now).toISOString(), clock: { h: parts.hour || 0, m: parts.minute || 0, s: parts.second || 0 }, volume: TV_VOLUMES[settings.volume] || 70, soundMethod: settings.soundMethod || "auto", confetti: settings.confetti !== false, display: tvDisplayView(settings), totals: base.totals, test: { seq: db.tv.test.seq || 0, sound: db.tv.test.sound }, rows, closes, customSounds: Array.from(need), unreachable: base.unreachable, ...(stale ? { stale: true } : {}) };
 }
 // Asking the shops can be slow (a shop that is waking up, or busy). The TV gives up on a refresh after a while, so:
 //  - only ONE round of questions is ever in progress; a second TV request joins it instead of starting another
@@ -701,23 +701,60 @@ app.get("/api/tv/sound/:id", tvAuth, (req, res) => {
 // ---- the owner's side: status, settings, building the app, turning it off ----
 app.get("/api/tv", requireOwner, (req, res) => {
   const db = loadDB();
-  res.json({ hasKey: !!db.tv.keyHash, createdAt: db.tv.createdAt, settings: db.tv.settings, lastSeenAt: tvLastSeenAt ? new Date(tvLastSeenAt).toISOString() : null, reports: db.tv.reports.slice(-12).reverse(), feed: tvFeedStats });
+  res.json({ hasKey: !!db.tv.keyHash, createdAt: db.tv.createdAt, settings: db.tv.settings, display: tvDisplayView(db.tv.settings), lastSeenAt: tvLastSeenAt ? new Date(tvLastSeenAt).toISOString() : null, reports: db.tv.reports.slice(-12).reverse(), feed: tvFeedStats });
 });
 app.put("/api/tv/settings", requireOwner, (req, res) => {
   const db = loadDB();
   const { defaultSound, volume, soundMethod, confetti } = req.body || {};
+  let displayClean = null;
+  if ((req.body || {}).display !== undefined) { const chk = tvDisplayCheck(req.body.display); if (chk.error) return res.status(400).json({ error: chk.error }); displayClean = chk.clean; }
   const ready = db.sounds.filter((s) => s.tvWav).map((s) => s.id);
   const okSound = defaultSound === undefined || defaultSound === "random" || defaultSound === "off" || defaultSound === "custom-random" || BUILTIN_SOUND_KEYS.includes(defaultSound) || (typeof defaultSound === "string" && /^custom:[a-f0-9]{16}$/.test(defaultSound) && ready.includes(defaultSound.slice(7)));
   if (!okSound) return res.status(400).json({ error: "That sound isn't available on the Roku yet." });
   if (volume !== undefined && !TV_VOLUMES[volume]) return res.status(400).json({ error: "Volume must be low, medium or high." });
   if (soundMethod !== undefined && !TV_SOUND_METHODS.includes(soundMethod)) return res.status(400).json({ error: "Unknown way of playing sounds." });
   if (confetti !== undefined && typeof confetti !== "boolean") return res.status(400).json({ error: "Confetti must be on or off." });
+  if (displayClean) tvDisplayApply(db, displayClean);
   if (confetti !== undefined) db.tv.settings.confetti = confetti;
   if (soundMethod !== undefined) db.tv.settings.soundMethod = soundMethod;
   if (defaultSound !== undefined) db.tv.settings.defaultSound = defaultSound;
   if (volume !== undefined) db.tv.settings.volume = volume;
   saveDB(db);
   res.json({ ok: true, settings: db.tv.settings });
+});
+
+// ---- what the TV shows: the layout, rotating between layouts, photos, text size ... ----
+// One set of options, kept here: the TV's own menu (press * on the remote) and this Settings screen both change the same thing, and the TV reads it with every refresh.
+const TV_LAYOUTS = ["classic", "podium", "race", "scoreboard", "spotlight", "rings", "feed", "cards", "ambient"];
+const TV_DISPLAY_DEFAULTS = { layout: "classic", rotate: false, rotateSeconds: 30, layouts: TV_LAYOUTS.slice(), photos: true, commission: true, banner: true, sound: true, textSize: "normal" };
+// Checks whatever the TV or the owner sent and returns only the valid parts, or an error that names the problem. Anything unknown is ignored.
+function tvDisplayCheck(b) {
+  const out = {}, bool = (k) => typeof b[k] === "boolean";
+  if (!b || typeof b !== "object") return { error: "Nothing to change." };
+  if (b.layout !== undefined) { if (!TV_LAYOUTS.includes(b.layout)) return { error: "That isn't one of the TV layouts." }; out.layout = b.layout; }
+  for (const k of ["rotate", "photos", "commission", "banner", "sound", "confetti"]) if (b[k] !== undefined) { if (!bool(k)) return { error: `${k} must be on or off.` }; out[k] = b[k]; }
+  if (b.rotateSeconds !== undefined) { if (![15, 30, 60, 120].includes(b.rotateSeconds)) return { error: "Rotate every 15, 30, 60 or 120 seconds." }; out.rotateSeconds = b.rotateSeconds; }
+  if (b.textSize !== undefined) { if (!["normal", "large"].includes(b.textSize)) return { error: "Text size is normal or large." }; out.textSize = b.textSize; }
+  if (b.volume !== undefined) { if (!TV_VOLUMES[b.volume]) return { error: "Volume must be low, medium or high." }; out.volume = b.volume; }
+  if (b.layouts !== undefined) {
+    if (!Array.isArray(b.layouts) || b.layouts.some((x) => !TV_LAYOUTS.includes(x))) return { error: "The rotation list has a layout the TV doesn't know." };
+    const keep = TV_LAYOUTS.filter((x) => b.layouts.includes(x)); if (!keep.length) return { error: "Keep at least one layout in the rotation." }; out.layouts = keep;
+  }
+  return { clean: out };
+}
+function tvDisplayApply(db, clean) {
+  const st = db.tv.settings, d = Object.assign({}, TV_DISPLAY_DEFAULTS, st.display || {});
+  for (const k of ["layout", "rotate", "rotateSeconds", "layouts", "photos", "commission", "banner", "sound", "textSize"]) if (clean[k] !== undefined) d[k] = clean[k];
+  st.display = d; if (clean.confetti !== undefined) st.confetti = clean.confetti; if (clean.volume !== undefined) st.volume = clean.volume;
+}
+const tvDisplayView = (st) => Object.assign({}, TV_DISPLAY_DEFAULTS, st.display || {}, { layouts: ((st.display || {}).layouts || TV_LAYOUTS).slice(), confetti: st.confetti !== false, volume: st.volume || "medium" });
+let tvDisplayTimes = [];
+app.post("/api/tv/display", tvAuth, (req, res) => {
+  const now = Date.now(); tvDisplayTimes = tvDisplayTimes.filter((t) => now - t < 60000);
+  if (tvDisplayTimes.length >= 60) return res.status(429).json({ error: "Too many changes." });
+  tvDisplayTimes.push(now);
+  const chk = tvDisplayCheck(req.body || {}); if (chk.error) return res.status(400).json({ error: chk.error });
+  const db = loadDB(); tvDisplayApply(db, chk.clean); saveDB(db); res.json({ ok: true, display: tvDisplayView(db.tv.settings) });
 });
 
 // The Roku tells the tracker what it is doing (its model, which sound it tried and whether that worked), so a silent TV can be diagnosed from here
