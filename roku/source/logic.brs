@@ -5,7 +5,13 @@
 ' larger amounts if decimals are used, so money is only ever handled as a whole number of cents.
 function tv_money(cents as dynamic) as string
     if cents = invalid then cents = 0
-    c = Int(cents)
+    ' whole cents are used as they are; only a number with a fraction is rounded down (Int() is not needed for a whole number, and must not disturb the cents)
+    t = type(cents)
+    if t = "Integer" or t = "roInt" or t = "LongInteger" or t = "roLongInteger"
+        c = cents
+    else
+        c = Int(cents)
+    end if
     sign = ""
     if c < 0
         sign = "-"
