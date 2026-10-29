@@ -53,7 +53,7 @@ try { sessionsValidAfter = Number(loadDB().sessionsValidAfter) || 0; } catch (e)
 
 // ---------- Auth: the owner password opens everything. A separate SALES TEAM password (set by the owner in Settings) opens only the Find-and-upsell screen. ----------
 function signSession(role) {
-  const payload = JSON.stringify({ role: role === "team" ? "team" : "owner", ts: Date.now() });
+  const payload = JSON.stringify({ role: role === "team" ? "team" : role === "va" ? "va" : "owner", ts: Date.now() });
   const sig = crypto.createHmac("sha256", SESSION_SECRET).update(payload).digest("hex");
   return Buffer.from(payload).toString("base64") + "." + sig;
 }
@@ -72,6 +72,11 @@ function sessionRole(token) {
     if (!db.teamPassword || !(p.ts >= (db.teamValidAfter || 0)) || Date.now() - p.ts > 30 * 86400000) return null;      // team logins last 30 days, and stop when that password is changed or turned off
     return "team";
   }
+  if (p.role === "va") {
+    const db = loadDB();
+    if (!db.vaPassword || !(p.ts >= (db.vaValidAfter || 0)) || Date.now() - p.ts > 30 * 86400000) return null;                    // VA logins last 30 days, and stop when that password is changed or turned off
+    return "va";
+  }
   return "owner";
 }
 function verifySession(token) { return sessionRole(token) === "owner"; }
@@ -84,6 +89,7 @@ function requireOwner(req, res, next) {
 function requireTeam(req, res, next) {
   const role = sessionRole(req.cookies.session);
   if (!role) return res.status(401).json({ error: "Not logged in." });
+  if (role !== "owner" && role !== "team") return res.status(403).json({ error: "That's not part of your access." });          // the VA has their own screens and must never reach Find or the upsell routes
   req.role = role; next();
 }
 const teamHash = (pw, salt) => { salt = salt || crypto.randomBytes(16).toString("hex"); return { salt, hash: crypto.scryptSync(String(pw), salt, 64).toString("hex") }; };
@@ -122,6 +128,11 @@ app.post("/api/login", (req, res) => {
     res.cookie("session", signSession("team"), { httpOnly: true, maxAge: 30 * 24 * 60 * 60 * 1000, sameSite: "lax" });
     return res.json({ ok: true, role: "team" });
   }
+  if (db.vaPassword && teamOk(password, db.vaPassword)) {
+    loginTries.delete(ip);
+    res.cookie("session", signSession("va"), { httpOnly: true, maxAge: 30 * 24 * 60 * 60 * 1000, sameSite: "lax" });
+    return res.json({ ok: true, role: "va" });
+  }
   const t = loginTries.get(ip) || []; t.push(Date.now()); loginTries.set(ip, t);
   res.status(401).json({ error: "Wrong password." });
 });
@@ -141,6 +152,9 @@ app.post("/api/locations", requireOwner, (req, res) => {
   const db = loadDB();
   const { name, url, secret } = req.body;
   if (!name || !url || !secret) return res.status(400).json({ error: "Name, URL, and secret are all required." });
+  const sameUrl = (u) => String(u).trim().toLowerCase().replace(/\/+$/, "");
+  const twin = db.locations.find((l) => sameUrl(l.url) === sameUrl(url));
+  if (twin) return res.status(400).json({ error: `That tracker is already added as "${twin.name}". Adding it twice would show every close twice.` });
   const entry = { id: newId(), name: name.trim(), url: url.trim().replace(/\/$/, ""), secret: secret.trim() };
   db.locations.push(entry);
   saveDB(db);
@@ -897,10 +911,91 @@ app.post("/api/team-access", requireOwner, (req, res) => {
   const db = loadDB(), pw = String((req.body || {}).password || "");
   if (pw.length < 6) return res.status(400).json({ error: "Use at least 6 characters." });
   if (db.ownerPasswordHash && hash(pw) === db.ownerPasswordHash) return res.status(400).json({ error: "That's the owner password. The sales team needs its own." });
+  if (db.vaPassword && teamOk(pw, db.vaPassword)) return res.status(400).json({ error: "That's the VA password. The sales team needs its own." });
   db.teamPassword = teamHash(pw); db.teamValidAfter = Date.now(); saveDB(db);               // anyone signed in with the old team password is signed out
   res.json({ ok: true });
 });
 app.delete("/api/team-access", requireOwner, (req, res) => { const db = loadDB(); db.teamPassword = null; db.teamValidAfter = Date.now(); saveDB(db); res.json({ ok: true }); });
+
+// ---------- VA: calls to no-shows and cancellations, and confirming tomorrow's appointments ----------
+// The VA signs in with their own password and can use ONLY these routes. The shops stay read-only: every call, note and outcome is kept here.
+function requireVA(req, res, next) {
+  const role = sessionRole(req.cookies.session);
+  if (!role) return res.status(401).json({ error: "Not logged in." });
+  if (role !== "owner" && role !== "va") return res.status(403).json({ error: "That's not part of your access." });
+  req.role = role; next();
+}
+app.get("/api/va-access", requireOwner, (req, res) => res.json({ enabled: !!loadDB().vaPassword }));
+app.post("/api/va-access", requireOwner, (req, res) => {
+  const db = loadDB(), pw = String((req.body || {}).password || "");
+  if (pw.length < 6) return res.status(400).json({ error: "Use at least 6 characters." });
+  if (db.ownerPasswordHash && hash(pw) === db.ownerPasswordHash) return res.status(400).json({ error: "That's the owner password. The VA needs their own." });
+  if (db.teamPassword && teamOk(pw, db.teamPassword)) return res.status(400).json({ error: "That's the sales team password. The VA needs their own." });
+  db.vaPassword = teamHash(pw); db.vaValidAfter = Date.now(); saveDB(db); res.json({ ok: true });
+});
+app.delete("/api/va-access", requireOwner, (req, res) => { const db = loadDB(); db.vaPassword = null; db.vaValidAfter = Date.now(); saveDB(db); res.json({ ok: true }); });
+const DEAD_OUTCOMES = ["no_answer", "callback", "rebooked", "not_interested"], CONFIRM_OUTCOMES = ["confirmed", "no_answer", "reschedule", "cancelled"];
+const vaKey = (locId, saleId, kind) => `${locId}|${saleId}|${kind}`;
+async function vaRows(db, kind) {
+  const got = await Promise.all(db.locations.map(async (loc) => {
+    try { const r = await callLocation(loc, `/api/cross-location/va-feed?kind=${kind}&days=45`); if (r.ok && r.data && Array.isArray(r.data.rows)) return { loc, rows: r.data.rows }; return { loc, problem: r.notOurApi ? "needs the latest tracker update" : "couldn't be reached" }; }
+    catch (e) { return { loc, problem: "couldn't be reached" }; } }));
+  const rows = [], problems = [];
+  got.forEach(({ loc, rows: rs, problem }) => { if (problem) problems.push({ locationId: loc.id, locationName: loc.name, problem }); else rs.forEach((r) => rows.push({ ...r, locationId: loc.id, locationName: loc.name })); });
+  return { rows, problems };
+}
+const callInfo = (rec) => (rec ? { attempts: rec.attempts, lastAt: rec.lastAt, lastBy: rec.by, outcome: rec.outcome, note: rec.note || "", callbackAt: rec.callbackAt || null } : null);
+app.get("/api/va/dead", requireVA, async (req, res) => {
+  const { rows, problems } = await vaRows(loadDB(), "dead"), db = loadDB(), calls = (db.vaCalls = db.vaCalls || {}), now = Date.now(), out = []; let later = 0, changed = false;
+  rows.forEach((r) => {
+    const rec = calls[vaKey(r.locationId, r.saleId, "dead")] || null;
+    // The customer booked again. If the VA had been calling them it counts as a save (the new booking's price is the money won back); if they came back on their own it isn't the VA's, and it leaves the list.
+    if (r.rebooked) { if (rec && rec.attempts > 0 && rec.outcome !== "rebooked") { Object.assign(rec, { outcome: "rebooked", auto: true, savedValue: r.rebooked.price || r.price, savedAt: new Date().toISOString() }); changed = true; } return; }
+    if (rec && (rec.outcome === "rebooked" || rec.outcome === "not_interested")) return;
+    if (rec && rec.outcome === "callback" && rec.callbackAt && Date.parse(rec.callbackAt) > now) { later++; return; }
+    out.push({ ...r, call: callInfo(rec) });
+  });
+  if (changed) saveDB(db);
+  out.sort((a, b) => (((a.call || {}).attempts || 0) - ((b.call || {}).attempts || 0)) || (a.date < b.date ? 1 : -1));
+  res.json({ rows: out, later, problems });
+});
+app.get("/api/va/tomorrow", requireVA, async (req, res) => {
+  const { rows, problems } = await vaRows(loadDB(), "tomorrow"), calls = loadDB().vaCalls || {};
+  const out = rows.map((r) => ({ ...r, call: callInfo(calls[vaKey(r.locationId, r.saleId, "confirm")]) })).sort((a, b) => ((a.call && a.call.outcome === "confirmed") - (b.call && b.call.outcome === "confirmed")) || (a.date < b.date ? -1 : 1));
+  res.json({ rows: out, problems, confirmed: out.filter((r) => r.call && r.call.outcome === "confirmed").length });
+});
+app.post("/api/va/call", requireVA, async (req, res) => {
+  const b = req.body || {}, kind = b.kind === "confirm" ? "confirm" : "dead";
+  if (!(kind === "confirm" ? CONFIRM_OUTCOMES : DEAD_OUTCOMES).includes(b.outcome)) return res.status(400).json({ error: "Pick what happened on the call." });
+  const loc = loadDB().locations.find((l) => l.id === b.locationId); if (!loc) return res.status(404).json({ error: "That location isn't set up." });
+  let row = null;
+  try { const r = await callLocation(loc, `/api/cross-location/va-feed?kind=${kind === "confirm" ? "tomorrow" : "dead"}&days=45`); row = ((r.data || {}).rows || []).find((x) => x.saleId === b.saleId) || null; } catch (e) { /* handled below */ }
+  if (!row) return res.status(404).json({ error: "That appointment isn't on the list any more. Refresh the list." });
+  const db = loadDB(), calls = (db.vaCalls = db.vaCalls || {}), key = vaKey(loc.id, row.saleId, kind);
+  const rec = calls[key] || (calls[key] = { locationId: loc.id, locationName: loc.name, saleId: row.saleId, kind, attempts: 0, history: [] });
+  const by = String(b.name || "").trim().slice(0, 40) || (req.role === "owner" ? "Owner" : "VA"), now = new Date().toISOString(), note = String(b.note || "").trim().slice(0, 500), cb = Date.parse(b.callbackAt);
+  rec.attempts++; rec.outcome = b.outcome; rec.lastAt = now; rec.by = by; if (note) rec.note = note;
+  Object.assign(rec, { customerName: row.customerName, car: row.car, price: row.price, date: row.date });
+  rec.callbackAt = b.outcome === "callback" ? new Date(isNaN(cb) || cb < Date.now() ? Date.now() + 86400000 : cb).toISOString() : null;
+  if (kind === "dead" && b.outcome === "rebooked") { rec.savedValue = row.price; rec.savedAt = now; rec.auto = false; }
+  rec.history.push({ at: now, by, outcome: b.outcome, note });
+  saveDB(db); res.json({ ok: true });
+});
+app.get("/api/va/results", requireVA, (req, res) => {
+  const calls = Object.values(loadDB().vaCalls || {}), days = Math.min(90, Math.max(1, Number(req.query.days) || 7));
+  const nowEt = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" })), startEt = new Date(nowEt); startEt.setHours(0, 0, 0, 0);
+  const window = (sinceMs) => {
+    const t = { calls: 0, reached: 0, saved: 0, savedValue: 0, confirmCalls: 0, confirmed: 0 }, person = {}, P = (n) => person[n] || (person[n] = { name: n, calls: 0, reached: 0, saved: 0, savedValue: 0, confirmCalls: 0, confirmed: 0 });
+    calls.forEach((rec) => {
+      (rec.history || []).forEach((h) => { if (Date.parse(h.at) < sinceMs) return; const p = P(h.by);
+        if (rec.kind === "confirm") { t.confirmCalls++; p.confirmCalls++; if (h.outcome === "confirmed") { t.confirmed++; p.confirmed++; } }
+        else { t.calls++; p.calls++; if (h.outcome !== "no_answer") { t.reached++; p.reached++; } } });
+      if (rec.kind === "dead" && rec.savedAt && Date.parse(rec.savedAt) >= sinceMs) { t.saved++; t.savedValue += rec.savedValue || 0; const p = P(rec.by); p.saved++; p.savedValue += rec.savedValue || 0; }
+    });
+    t.savedValue = Math.round(t.savedValue * 100) / 100; return { ...t, byPerson: Object.values(person).sort((a, b) => b.savedValue - a.savedValue || b.calls - a.calls) };
+  };
+  res.json({ days, today: window(Date.now() - (nowEt - startEt)), period: window(Date.now() - days * 86400000) });
+});
 
 // ---------- Find an appointment and add an upsell (owner or sales team). Reads and writes go to the shop that owns the appointment. ----------
 async function askShop(loc, pathAndQuery, method, body) {
