@@ -243,7 +243,7 @@ function renderVAApp(app, isOwner) {
     drawTabs(); body.innerHTML = ""; body.appendChild(el("div", { class: "muted", text: "Loading..." }));
     try {
       if (tab === "dead") { const d = await api("/api/va/dead"); counts.dead = d.rows.length; drawTabs(); body.innerHTML = ""; problem(d.problems).forEach((n) => body.appendChild(n));
-        body.appendChild(el("div", { class: "muted", style: "font-size:13px;margin-bottom:8px", "data-part": "va-summary", text: `${d.rows.length} to call${d.later ? ` \u00B7 ${d.later} set to call back later` : ""}. Never-called customers come first.` }));
+        body.appendChild(el("div", { class: "muted", style: "font-size:13px;margin-bottom:8px", "data-part": "va-summary", text: `${d.rows.length} to call, worth ${money(d.value)} (${money(d.noShowValue)} in no-shows, ${money(d.cancelledValue)} in cancellations)${d.later ? ` \u00B7 ${d.later} set to call back later (${money(d.laterValue)})` : ""}. Never-called customers come first.` }));
         if (!d.rows.length) body.appendChild(el("div", { class: "card", style: "text-align:center;padding:24px", text: "Nobody left to call. Nice work." })); d.rows.forEach((r) => body.appendChild(rowCard(r, "dead"))); }
       else if (tab === "tomorrow") { const d = await api("/api/va/tomorrow"); counts.tomorrow = d.rows.length - d.confirmed; drawTabs(); body.innerHTML = ""; problem(d.problems).forEach((n) => body.appendChild(n));
         body.appendChild(el("div", { class: "muted", style: "font-size:13px;margin-bottom:8px", "data-part": "va-summary", text: `${d.rows.length} appointment${d.rows.length === 1 ? "" : "s"} tomorrow \u00B7 ${d.confirmed} confirmed \u00B7 ${d.rows.length - d.confirmed} still to confirm.` }));
