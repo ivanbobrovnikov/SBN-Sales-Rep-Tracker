@@ -169,7 +169,7 @@ app.delete("/api/locations/:id", requireOwner, (req, res) => {
 });
 
 // ---------- Goals - one per rep per cadence, matched by rep name across locations ----------
-app.get("/api/goals", requireOwner, (req, res) => {
+app.get("/api/goals", requireTeam, (req, res) => {
   const db = loadDB();
   res.json(db.goals);
 });
@@ -317,7 +317,7 @@ async function buildCombinedStats(db, query) {
   const leftOut = results.flatMap((l) => (l.leftOut || []).map((x) => ({ ...x, locationId: l.locationId, locationName: l.locationName })));
   return { perRep, errors, locationsQueried: results.map((r) => r.locationName), leftOut };
 }
-app.get("/api/combined/salesrep-stats", requireOwner, async (req, res) => res.json(await buildCombinedStats(loadDB(), req.query)));
+app.get("/api/combined/salesrep-stats", requireTeam, async (req, res) => res.json(await buildCombinedStats(loadDB(), req.query)));
 
 // ---------- Combined Cleanup ----------
 app.get("/api/combined/cleanup-list", requireOwner, async (req, res) => {
@@ -371,7 +371,7 @@ async function callLocation(loc, path, body) {
 }
 const NEEDS_UPDATE = (name) => `${name} needs the latest tracker update before jobs can be edited from here.`;
 
-app.get("/api/combined/salesreps", requireOwner, async (req, res) => {
+app.get("/api/combined/salesreps", requireTeam, async (req, res) => {
   const db = loadDB();
   const out = await Promise.all(db.locations.map(async (loc) => {
     const base = { locationId: loc.id, locationName: loc.name, salesReps: [] };
@@ -900,7 +900,7 @@ const photoFile = (id) => path.join(PHOTOS_DIR, `${id}.png`);
 app.get("/api/rep-photos", requireOwner, (req, res) => {
   res.json(loadDB().repPhotos.map((p) => ({ key: p.key, name: p.name, id: p.id, at: p.at })));
 });
-app.get("/api/rep-photos/:id", requireOwner, (req, res) => {
+app.get("/api/rep-photos/:id", requireTeam, (req, res) => {
   const ok = /^[a-f0-9]{16}$/.test(req.params.id) && loadDB().repPhotos.some((p) => p.id === req.params.id) && fs.existsSync(photoFile(req.params.id));
   if (!ok) return res.status(404).json({ error: "Photo not found." });
   res.set({ "Content-Type": "image/png", "X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=3600" });
@@ -1032,6 +1032,51 @@ app.get("/api/va/results", requireVA, (req, res) => {
     t.savedValue = Math.round(t.savedValue * 100) / 100; return { ...t, byPerson: Object.values(person).sort((a, b) => b.savedValue - a.savedValue || b.calls - a.calls) };
   };
   res.json({ days, today: window(Date.now() - (nowEt - startEt)), period: window(Date.now() - days * 86400000) });
+});
+
+// ---------- My profile (the sales team): their own picture and their own deal sound ----------
+async function knownRepKeys(db) {
+  const keys = new Set();
+  await Promise.all(db.locations.map(async (loc) => { const r = await askShop(loc, `/api/cross-location/salesreps?secret=${encodeURIComponent(loc.secret)}`); if (r.ok && r.data) (r.data.salesReps || []).forEach((x) => keys.add(repKey(repDisplayName(x.name)))); }));
+  return keys;
+}
+async function meWho(req, res) {
+  const display = repDisplayName(req.query.name || (req.body && req.body.name)), key = repKey(display);
+  if (!key || !(await knownRepKeys(loadDB())).has(key)) { res.status(400).json({ error: "Pick your name from the list." }); return null; }
+  return { display, key };
+}
+app.get("/api/me/profile", requireTeam, async (req, res) => {
+  const who = await meWho(req, res); if (!who) return;
+  const db = loadDB(), photo = db.repPhotos.find((p) => p.key === who.key), snd = db.repSounds.find((r) => r.key === who.key);
+  res.json({ name: who.display, photoId: photo ? photo.id : null, sound: snd ? snd.choice : "default", customSounds: db.sounds.map((x) => ({ id: x.id, name: x.name })) });
+});
+app.put("/api/me/photo", requireTeam, express.raw({ type: () => true, limit: MAX_PHOTO_BYTES }), async (req, res) => {
+  const who = await meWho(req, res); if (!who) return;
+  const check = checkPhotoPng(req.body); if (check.error) return res.status(400).json({ error: check.error });
+  const db = loadDB(), existing = db.repPhotos.find((p) => p.key === who.key);
+  if (!existing && db.repPhotos.length >= MAX_REP_PHOTOS) return res.status(400).json({ error: "That's too many reps with photos." });
+  const id = crypto.randomBytes(8).toString("hex");
+  try { fs.mkdirSync(PHOTOS_DIR, { recursive: true }); fs.writeFileSync(photoFile(id), req.body); } catch (e) { return res.status(500).json({ error: "Couldn't save that on the server." }); }
+  if (existing) { try { fs.unlinkSync(photoFile(existing.id)); } catch (e) { /* already gone */ } existing.id = id; existing.name = who.display; existing.at = new Date().toISOString(); }
+  else db.repPhotos.push({ key: who.key, name: who.display, id, at: new Date().toISOString() });
+  saveDB(db); res.json({ ok: true, id });
+});
+app.delete("/api/me/photo", requireTeam, async (req, res) => {
+  const who = await meWho(req, res); if (!who) return;
+  const db = loadDB(), existing = db.repPhotos.find((p) => p.key === who.key);
+  if (existing) { try { fs.unlinkSync(photoFile(existing.id)); } catch (e) { /* already gone */ } db.repPhotos = db.repPhotos.filter((p) => p.key !== who.key); saveDB(db); }
+  res.json({ ok: true });
+});
+app.put("/api/me/sound", requireTeam, async (req, res) => {
+  const who = await meWho(req, res); if (!who) return;
+  const choice = (req.body || {}).choice, db = loadDB();
+  if (choice === "default" || choice === null || choice === "") { db.repSounds = db.repSounds.filter((r) => r.key !== who.key); saveDB(db); return res.json({ ok: true, choice: "default" }); }
+  const valid = typeof choice === "string" && (BUILTIN_SOUND_KEYS.includes(choice) || (/^custom:[a-f0-9]{16}$/.test(choice) && db.sounds.some((x) => x.id === choice.slice(7))));
+  if (!valid) return res.status(400).json({ error: "That sound isn't available." });
+  const existing = db.repSounds.find((r) => r.key === who.key);
+  if (!existing && db.repSounds.length >= MAX_REP_SOUNDS) return res.status(400).json({ error: "That's too many reps with their own sound." });
+  if (existing) { existing.name = who.display; existing.choice = choice; } else db.repSounds.push({ key: who.key, name: who.display, choice });
+  saveDB(db); res.json({ ok: true, choice });
 });
 
 // ---------- Find an appointment and add an upsell (owner or sales team). Reads and writes go to the shop that owns the appointment. ----------
