@@ -12,6 +12,7 @@
 })();
 
 const REP_NAV_ICONS = {
+  "me": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>`,
   "combined": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>`,
   "audit": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6"/></svg>`,
   "leaderboard": `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 4h8v5a4 4 0 0 1-8 0z"/><path d="M8 6H5a1 1 0 0 0-1 1c0 2.2 1.6 3.6 4 4M16 6h3a1 1 0 0 1 1 1c0 2.2-1.6 3.6-4 4M12 13v4M8 20h8M10 17h4"/></svg>`,
@@ -64,6 +65,7 @@ let statsCache = null;
 
 async function boot() {
   session = await api("/api/session");
+  if (session.role === "team") currentTab = "find";             // a rep always starts on Find, where the day's work is
   render();
 }
 
@@ -83,7 +85,7 @@ function render() {
     return;
   }
 
-  if (session.role === "team") { renderTeam(app); return; }          // the sales team only ever sees Find
+  if (session.role === "team") { renderTeamApp(app); return; }         // the sales team: Find, Combined, Audit (view only) and their own profile
   if (session.role === "va") { renderVAApp(app, false); return; }     // the VA only ever sees the call lists
   if (currentTab === "va") { renderVAApp(app, true); return; }        // the owner opening the VA screens from Settings
 
@@ -275,6 +277,56 @@ async function renderVAAccessCard(content) {
   await draw();
 }
 
+// ---------- The sales team's app: Find, Combined, Audit (all view-only) and their own profile ----------
+function renderTeamApp(app) {
+  if (!["find", "combined", "audit", "me"].includes(currentTab)) currentTab = "find";
+  app.appendChild(el("div", { class: "header" }, [el("div", { class: "title oswald", style: "flex:1", text: "SBN Sales Team" }), el("button", { class: "ghost", "data-act": "logout", text: "Log out", onclick: async () => { await api("/api/logout", { method: "POST" }); await boot(); } })]));
+  const content = el("div"); app.appendChild(content);
+  if (currentTab === "combined") renderCombined(content); else if (currentTab === "audit") renderAudit(content); else if (currentTab === "me") renderMyProfile(content); else renderFind(content);
+  const bar = el("div", { class: "bottom-tabs" });
+  [["find", "Find", "\u2022"], ["combined", "Combined", "\u2022"], ["audit", "Audit", "\u2022"], ["me", "My profile", "\u2022"]].forEach(([key, label, icon]) => bar.appendChild(el("button", { class: "bottom-tab" + (currentTab === key ? " active" : ""), "data-tab": key, onclick: () => { currentTab = key; render(); } }, [tabIcon(key, icon), el("div", { text: label })])));
+  document.body.appendChild(bar);
+}
+// My profile: pick your name, then change your own picture and the sound that plays on the TV when you close a deal
+async function renderMyProfile(content) {
+  const box = el("div", { class: "card", "data-part": "my-profile" }), body = el("div"), msg = el("div", { style: "font-size:12.5px;min-height:16px;margin:6px 0" });
+  const say = (t, c) => { msg.textContent = t; msg.style.color = c || "var(--sub)"; };
+  const nameSel = el("select", { "data-field": "me-name", style: "width:100%;margin-bottom:10px", "aria-label": "Your name" });
+  box.appendChild(el("div", { style: "font-weight:600;margin-bottom:2px", text: "My profile" }));
+  box.appendChild(el("div", { class: "muted", style: "font-size:12.5px;margin-bottom:10px", text: "Pick your name, then change your picture and the sound that plays on the TV when you close a deal." }));
+  box.appendChild(nameSel); box.appendChild(msg); box.appendChild(body); content.appendChild(box);
+  let reps = []; try { reps = (await api("/api/rep/reps")).reps || []; } catch (e) { say("Couldn't load the list of names.", "var(--red)"); return; }
+  nameSel.appendChild(el("option", { value: "", text: "Choose your name..." })); reps.forEach((n) => nameSel.appendChild(el("option", { value: n, text: n })));
+  const saved = localStorage.getItem(REP_NAME_KEY) || ""; if (reps.includes(saved)) nameSel.value = saved;
+  async function load() {
+    body.innerHTML = ""; say(""); const name = nameSel.value; if (!name) return; localStorage.setItem(REP_NAME_KEY, name);
+    let p; try { p = await api("/api/me/profile?name=" + encodeURIComponent(name)); } catch (e) { say(e.message || "Couldn't load your profile.", "var(--red)"); return; }
+    const initials = name.split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
+    const pic = p.photoId ? el("img", { src: "/api/rep-photos/" + p.photoId, alt: name, "data-part": "my-photo", style: "width:84px;height:84px;border-radius:50%;object-fit:cover;flex:none" }) : el("div", { "data-part": "my-photo-none", style: "width:84px;height:84px;border-radius:50%;flex:none;background:var(--cardAlt);display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:600", text: initials });
+    const file = el("input", { type: "file", accept: "image/*", style: "display:none", "data-field": "me-photo-file" }), editor = el("div");
+    file.addEventListener("change", () => { if (file.files[0]) openEditor(file.files[0]); file.value = ""; });
+    body.appendChild(el("div", { style: "font-size:11px;letter-spacing:0.04em;margin:6px 0" , class: "muted", text: "MY PICTURE" }));
+    body.appendChild(el("div", { class: "row", style: "gap:14px;align-items:center;justify-content:flex-start;flex-wrap:wrap" }, [pic, el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [el("button", { class: "primary", "data-act": "me-pick", text: p.photoId ? "Change picture" : "Add a picture", onclick: () => file.click() }), p.photoId ? el("button", { class: "ghost", "data-act": "me-remove", text: "Remove", onclick: async () => { try { await api("/api/me/photo?name=" + encodeURIComponent(name), { method: "DELETE" }); await load(); say("Picture removed.", "var(--green)"); } catch (e) { say(e.message, "var(--red)"); } } }) : null])]));
+    body.appendChild(file); body.appendChild(editor);
+    const sel = el("select", { "data-field": "me-sound", style: "width:100%;margin-bottom:8px" }, [el("option", { value: "default", text: "Use the TV's usual sound" }), ...Object.entries(DEAL_SOUNDS).map(([k, d]) => el("option", { value: k, text: d.name })), ...p.customSounds.map((s) => el("option", { value: "custom:" + s.id, text: s.name }))]);
+    sel.value = p.sound; if (sel.value !== p.sound) sel.value = "default";
+    sel.addEventListener("change", async () => { try { await api("/api/me/sound", { method: "PUT", body: JSON.stringify({ name, choice: sel.value }) }); say("Saved. The TV uses it from your next deal.", "var(--green)"); } catch (e) { say(e.message || "Couldn't save that.", "var(--red)"); } });
+    body.appendChild(el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.04em;margin:16px 0 6px", text: "MY DEAL SOUND" })); body.appendChild(sel);
+    async function openEditor(f) {
+      editor.innerHTML = ""; if (f.size > 25 * 1024 * 1024) { say("That picture is very large (over 25 MB). Pick a smaller one.", "var(--red)"); return; }
+      let img; try { img = await createImageBitmap(f); } catch (e) { say("This browser couldn't read that picture. Try a JPEG or PNG.", "var(--red)"); return; }
+      const w = img.width, h = img.height; if (Math.min(w, h) < 64) { say("That picture is too small (at least 64 pixels across).", "var(--red)"); return; }
+      say(""); const st = { zoom: 1, px: 0, py: h > w ? -0.4 : 0 };
+      const draw = (c, N) => { const x = c.getContext("2d"); x.clearRect(0, 0, N, N); x.save(); x.beginPath(); x.arc(N / 2, N / 2, N / 2, 0, Math.PI * 2); x.closePath(); x.clip(); const s = Math.min(w, h) / st.zoom; x.drawImage(img, (w - s) * (0.5 + st.px / 2), (h - s) * (0.5 + st.py / 2), s, s, 0, 0, N, N); x.restore(); };
+      const prev = el("canvas", { width: "200", height: "200", "data-part": "me-preview", style: "width:140px;height:140px;flex:none;border-radius:50%;background:var(--cardAlt)" }); draw(prev, 200);
+      const slider = (label, key, min, max) => { const i = el("input", { type: "range", min: String(min), max: String(max), step: "0.01", value: String(st[key]), style: "width:100%" }); i.addEventListener("input", () => { st[key] = Number(i.value); draw(prev, 200); }); return el("div", { style: "margin:4px 0" }, [el("div", { class: "muted", style: "font-size:11.5px", text: label }), i]); };
+      editor.appendChild(el("div", { class: "row", style: "gap:14px;align-items:center;margin-top:10px;flex-wrap:wrap" }, [prev, el("div", { style: "flex:1;min-width:170px" }, [slider("Zoom in", "zoom", 1, 3), slider("Move left / right", "px", -1, 1), slider("Move up / down", "py", -1, 1)])]));
+      editor.appendChild(el("div", { class: "row", style: "gap:8px;margin-top:8px;justify-content:flex-start" }, [el("button", { class: "primary", "data-act": "me-save-photo", text: "Save picture", onclick: async (ev) => { const b = ev.currentTarget; b.disabled = true; try { const out = document.createElement("canvas"); out.width = 168; out.height = 168; draw(out, 168); const blob = await new Promise((r) => out.toBlob(r, "image/png")); if (!blob || blob.size > 280 * 1024) throw new Error("That picture came out too large. Try a simpler one."); const r = await fetch("/api/me/photo?name=" + encodeURIComponent(name), { method: "PUT", headers: { "Content-Type": "image/png" }, body: blob, credentials: "same-origin" }); if (!r.ok) throw new Error(((await r.json().catch(() => ({}))).error) || "Couldn't save the picture."); await load(); say("Saved. The TV picks it up within about 15 seconds.", "var(--green)"); } catch (e) { say(e.message || "Couldn't save the picture.", "var(--red)"); b.disabled = false; } } }), el("button", { class: "ghost", text: "Cancel", onclick: () => { editor.innerHTML = ""; } })]));
+    }
+  }
+  nameSel.addEventListener("change", load); await load();
+}
+
 function renderTeam(app) {
   app.appendChild(el("div", { class: "header" }, [el("div", { class: "title oswald", style: "flex:1", text: "SBN Sales Team" }), el("button", { class: "ghost", "data-act": "logout", text: "Log out", onclick: async () => { await api("/api/logout", { method: "POST" }); await boot(); } })]));
   const content = el("div"); app.appendChild(content); renderFind(content);
@@ -287,7 +339,7 @@ async function renderTeamAccessCard(content) {
     const pw = el("input", { type: "password", placeholder: on ? "New team password (signs everyone out)" : "Choose a team password (6+ characters)", autocomplete: "new-password", "aria-label": "Team password" });
     const note = el("div", { class: "notice " + (ok ? "ok" : "err"), text: msg || "" });
     card.appendChild(el("div", { class: "row" }, [el("div", { style: "font-weight:500", text: "Sales team access" }), el("span", { class: "rchip", style: on ? "color:var(--green);border-color:var(--green)" : "", text: on ? "On" : "Off" })]));
-    card.appendChild(el("div", { class: "muted", style: "margin:6px 0 10px", text: "Reps sign in with this password and can only search appointments and add upsells. They can't see pay, the audit, the leaderboard settings or anything else." }));
+    card.appendChild(el("div", { class: "muted", style: "margin:6px 0 10px", text: "Reps sign in with this password and pick their name. They can search appointments and add upsells, look at Combined and the Audit (view only, they can't edit a job or a commission), and change their own picture and deal sound. They can't reach Settings, Cleanup, the Leaderboard setup or the Roku TV." }));
     card.appendChild(el("div", { class: "field" }, [pw]));
     card.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [
       el("button", { class: "primary", "data-act": "team-set", style: "padding:10px 18px", text: on ? "Change team password" : "Turn on", onclick: async () => { try { await api("/api/team-access", { method: "POST", body: JSON.stringify({ password: pw.value }) }); await draw(on ? "Changed. Everyone signed in with the old one is signed out." : "On. Give your reps the address and this password.", true); } catch (e) { await draw(e.message, false); } } }),
@@ -332,8 +384,7 @@ function renderPage(content) {
 }
 
 async function renderSettings(content) {
-  renderTeamAccessCard(content);
-  renderVAAccessCard(content);
+  renderVAAccessCard(content);                  // the VA is the only separate login: reps and the owner share one login and see everything
   const list = el("div", { style: "margin-bottom:16px" });
   async function loadList() {
     const locs = await api("/api/locations");
@@ -1467,7 +1518,7 @@ async function renderAudit(content) {
     const slot = el("div");
     const statusColor = c.isUpsell ? "var(--cyan)" : c.status === "arrived" ? "var(--green)" : c.status === "no_show" ? "var(--red)" : "var(--sub)";
     const commText = c.isUpsell ? "upsell: counts on the leaderboard, no commission" : c.status === "arrived" ? `+${money(c.commissionAmount)} earned` : c.status === "no_show" ? "no-show, earns nothing" : c.status === "cancelled" ? "cancelled" : `${money(c.commissionAmount)} if it shows`;
-    const editBtn = c.isUpsell ? null : el("button", { class: "ghost", style: "font-size:11px;padding:3px 9px", text: "Edit", onclick: () => {
+    const editBtn = c.isUpsell || session.role !== "owner" ? null : el("button", { class: "ghost", style: "font-size:11px;padding:3px 9px", text: "Edit", onclick: () => {
       if (slot.firstChild) { slot.innerHTML = ""; return; }
       buildEditor(c, slot);
     } });
@@ -1485,7 +1536,7 @@ async function renderAudit(content) {
       el("div", { class: "muted", style: "font-size:11px;margin-top:3px", text: `Closed ${formatDateTime(c.closedAt)} · ${c.duringHours ? "in-hours" : "after-hours"} · car scheduled ${formatDateTime(c.date)} · ${commText}` }),
       el("div", { style: "margin-top:6px;display:flex;gap:8px;flex-wrap:wrap" }, [
         editBtn,
-        el("button", { class: "ghost", style: "font-size:11px;padding:3px 9px", text: "↻ Reschedule: don't count", onclick: () => setReschedule(c, true) }),
+        session.role === "owner" ? el("button", { class: "ghost", style: "font-size:11px;padding:3px 9px", text: "↻ Reschedule: don't count", onclick: () => setReschedule(c, true) }) : null,
       ]),
       slot,
     ]);
@@ -1619,8 +1670,8 @@ async function renderAudit(content) {
 
   content.appendChild(picker.el);
   content.appendChild(locationTabs);
-  content.appendChild(el("div", { style: "margin-bottom:12px" }, [el("button", { class: "ghost", text: "＋ Add a missing job", onclick: toggleAddForm })]));
-  content.appendChild(addWrap);
+  if (session.role === "owner") content.appendChild(el("div", { style: "margin-bottom:12px" }, [el("button", { class: "ghost", text: "＋ Add a missing job", onclick: toggleAddForm })]));
+  if (session.role === "owner") content.appendChild(addWrap);
   content.appendChild(flash);
   content.appendChild(body);
   await Promise.all([loadReps(), load()]);
