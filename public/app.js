@@ -84,6 +84,8 @@ function render() {
   }
 
   if (session.role === "team") { renderTeam(app); return; }          // the sales team only ever sees Find
+  if (session.role === "va") { renderVAApp(app, false); return; }     // the VA only ever sees the call lists
+  if (currentTab === "va") { renderVAApp(app, true); return; }        // the owner opening the VA screens from Settings
 
   if (currentTab === "leaderboard") {
     renderLeaderboard(app);
@@ -202,6 +204,77 @@ async function renderFind(content) {
   fillNames(); drawChips(); loadMine(); runSearch();
 }
 // The sales team's screen: just a title, a log out button, and Find.
+// ---------- VA: call list, confirm tomorrow, results ----------
+const VA_NAME_KEY = "vaName";
+function renderVAApp(app, isOwner) {
+  app.appendChild(el("div", { class: "header" }, [el("div", { class: "title oswald", style: "flex:1", text: "SBN VA" }),
+    isOwner ? el("button", { class: "ghost", "data-act": "va-back", text: "Back", onclick: () => { currentTab = "settings"; render(); } }) : el("button", { class: "ghost", "data-act": "logout", text: "Log out", onclick: async () => { await api("/api/logout", { method: "POST" }); await boot(); } })]));
+  const content = el("div"); app.appendChild(content);
+  let tab = "dead"; const body = el("div"), counts = { dead: null, tomorrow: null };
+  const name = el("input", { type: "text", "data-field": "va-name", placeholder: "Your name (so your calls are counted)", value: localStorage.getItem(VA_NAME_KEY) || "", "aria-label": "Your name" });
+  name.addEventListener("input", () => localStorage.setItem(VA_NAME_KEY, name.value));
+  const tabsEl = el("div", { class: "tabs", style: "margin:10px 0", role: "tablist" });
+  const drawTabs = () => { tabsEl.innerHTML = ""; [["dead", `Call list${counts.dead == null ? "" : " (" + counts.dead + ")"}`], ["tomorrow", `Confirm tomorrow${counts.tomorrow == null ? "" : " (" + counts.tomorrow + ")"}`], ["results", "My results"]].forEach(([k, l]) => tabsEl.appendChild(el("button", { class: "tab-btn" + (tab === k ? " active" : ""), role: "tab", "data-va-tab": k, "aria-selected": String(tab === k), onclick: () => { tab = k; show(); }, text: l }))); };
+  async function log(row, kind, outcome, note, callbackAt) {
+    if (!name.value.trim()) { name.focus(); alert("Type your name first, so your calls are counted."); return; }
+    try { await api("/api/va/call", { method: "POST", body: JSON.stringify({ locationId: row.locationId, saleId: row.saleId, kind, outcome, note, callbackAt, name: name.value.trim() }) }); await show(); } catch (e) { alert(e.message || "Couldn't save that."); }
+  }
+  const problem = (ps) => (ps || []).map((p) => el("div", { class: "notice err", "data-part": "va-problem", text: `${p.locationName} ${p.problem}, so its appointments aren't on this list.` }));
+  function rowCard(r, kind) {
+    const note = el("input", { type: "text", "data-field": "va-note", placeholder: "Note (optional)", value: (r.call && r.call.note) || "", style: "width:100%;margin:6px 0" });
+    const btn = (label, outcome, cls, extra) => el("button", { class: cls || "ghost", "data-act": "va-" + outcome, style: "font-size:13px;padding:8px 12px;min-height:40px", text: label, onclick: () => log(r, kind, outcome, note.value, extra && extra()) });
+    const later = el("select", { "data-field": "va-later", "aria-label": "Call back when", style: "min-height:40px;font-size:13px" }, [["2h", "In 2 hours"], ["1d", "Tomorrow"], ["3d", "In 3 days"], ["7d", "Next week"]].map(([v, l]) => el("option", { value: v, text: l })));
+    const laterAt = () => new Date(Date.now() + { "2h": 7200000, "1d": 86400000, "3d": 259200000, "7d": 604800000 }[later.value]).toISOString();
+    const when = kind === "dead" ? `${r.status === "no_show" ? "No-show" : "Cancelled"} \u00B7 ${whenText(r.date)}` : `Tomorrow \u00B7 ${new Date(r.date).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit" })}`;
+    const c = r.call;
+    return el("div", { class: "card", "data-part": "va-row", "data-kind": kind, "data-sale": r.saleId, style: "margin-bottom:10px" }, [
+      el("div", { class: "row" }, [el("div", { style: "min-width:0;flex:1" }, [el("div", { style: "font-weight:600;font-size:16px;overflow-wrap:anywhere", text: r.customerName || "(no name)" }), el("div", { class: "muted", style: "font-size:12.5px", text: `${r.car}${r.service ? " \u00B7 " + r.service : ""}` })]), el("div", { class: "mono", style: "font-weight:700", text: money(r.price) })]),
+      el("div", { class: "muted", style: "font-size:12.5px;margin:2px 0 6px", text: `${when} \u00B7 ${r.locationName}${r.salesRepName ? " \u00B7 " + r.salesRepName : ""}` }),
+      el("div", { style: "display:flex;gap:8px;margin-bottom:4px" }, [r.phone ? el("a", { class: "va-btn va-call", "data-act": "va-call", href: "tel:" + r.phone, text: "\u260E " + r.phone }) : el("span", { class: "muted", text: "No phone on file" }), r.phone ? el("a", { class: "va-btn", "data-act": "va-text", href: "sms:" + r.phone, text: "Text" }) : null]),
+      c && c.attempts ? el("div", { style: "font-size:12px;color:var(--amber)", "data-part": "va-history", text: `Called ${c.attempts} time${c.attempts === 1 ? "" : "s"}. Last: ${whenText(c.lastAt)} by ${c.lastBy}${c.outcome === "no_answer" ? " (no answer)" : c.outcome ? " (" + c.outcome.replace("_", " ") + ")" : ""}` }) : null,
+      note,
+      el("div", { style: "display:flex;gap:6px;flex-wrap:wrap;align-items:center" }, kind === "dead"
+        ? [btn("No answer", "no_answer"), btn("Rebooked \u2713", "rebooked", "primary"), btn("Not interested", "not_interested"), el("span", { style: "display:flex;gap:4px" }, [later, btn("Call back later", "callback", "ghost", laterAt)])]
+        : [btn("Confirmed \u2713", "confirmed", "primary"), btn("No answer", "no_answer"), btn("Wants to reschedule", "reschedule"), btn("Says cancel", "cancelled")])]);
+  }
+  async function show() {
+    drawTabs(); body.innerHTML = ""; body.appendChild(el("div", { class: "muted", text: "Loading..." }));
+    try {
+      if (tab === "dead") { const d = await api("/api/va/dead"); counts.dead = d.rows.length; drawTabs(); body.innerHTML = ""; problem(d.problems).forEach((n) => body.appendChild(n));
+        body.appendChild(el("div", { class: "muted", style: "font-size:13px;margin-bottom:8px", "data-part": "va-summary", text: `${d.rows.length} to call${d.later ? ` \u00B7 ${d.later} set to call back later` : ""}. Never-called customers come first.` }));
+        if (!d.rows.length) body.appendChild(el("div", { class: "card", style: "text-align:center;padding:24px", text: "Nobody left to call. Nice work." })); d.rows.forEach((r) => body.appendChild(rowCard(r, "dead"))); }
+      else if (tab === "tomorrow") { const d = await api("/api/va/tomorrow"); counts.tomorrow = d.rows.length - d.confirmed; drawTabs(); body.innerHTML = ""; problem(d.problems).forEach((n) => body.appendChild(n));
+        body.appendChild(el("div", { class: "muted", style: "font-size:13px;margin-bottom:8px", "data-part": "va-summary", text: `${d.rows.length} appointment${d.rows.length === 1 ? "" : "s"} tomorrow \u00B7 ${d.confirmed} confirmed \u00B7 ${d.rows.length - d.confirmed} still to confirm.` }));
+        if (!d.rows.length) body.appendChild(el("div", { class: "card", style: "text-align:center;padding:24px", text: "No appointments tomorrow." }));
+        d.rows.forEach((r) => { const card = rowCard(r, "confirm"); if (r.call && r.call.outcome === "confirmed") { card.style.opacity = "0.6"; card.appendChild(el("div", { style: "color:var(--green);font-size:12.5px;margin-top:6px", text: "Confirmed \u2713" })); } body.appendChild(card); }); }
+      else { const d = await api("/api/va/results?days=7"), tile = (l, v, c) => el("div", { class: "metric" }, [el("div", { class: "metric-label", text: l }), el("div", { class: "metric-value mono", style: c ? "color:" + c : "", text: String(v) })]);
+        body.innerHTML = ""; [["Today", d.today], ["Last 7 days", d.period]].forEach(([title, w]) => { body.appendChild(el("div", { style: "font-weight:600;margin:8px 0 6px", text: title }));
+          body.appendChild(el("div", { class: "metric-grid", "data-part": "va-results" }, [tile("Calls", w.calls), tile("Reached", w.reached), tile("Rebooked", w.saved, "var(--green)"), tile("$ recovered", money(w.savedValue), "var(--green)"), tile("Confirm calls", w.confirmCalls), tile("Confirmed", w.confirmed)])); });
+        if (d.period.byPerson.length > 1 || isOwner) body.appendChild(el("div", { class: "card", "data-part": "va-people", style: "padding:12px 14px" }, [el("div", { style: "font-weight:500;margin-bottom:6px", text: "By person (last 7 days)" }), ...d.period.byPerson.map((p) => el("div", { class: "row", style: "font-size:13px;padding:3px 0" }, [el("span", { text: p.name }), el("span", { class: "muted", text: `${p.calls} calls \u00B7 ${p.saved} rebooked \u00B7 ${money(p.savedValue)} \u00B7 ${p.confirmed} confirmed` })]))])); }
+    } catch (e) { body.innerHTML = ""; body.appendChild(el("div", { class: "notice err", text: e.message || "Couldn't load that." })); }
+  }
+  content.appendChild(el("div", { class: "field" }, [name])); content.appendChild(tabsEl); content.appendChild(body); show();
+  api("/api/va/tomorrow").then((d) => { counts.tomorrow = d.rows.length - d.confirmed; drawTabs(); }, () => {});      // both counts show as soon as the VA signs in
+}
+// Settings card: the owner turns on a separate password for the VA, and can open the VA's screens.
+async function renderVAAccessCard(content) {
+  const card = el("div", { class: "card", "data-part": "va-access" }); content.appendChild(card);
+  async function draw(msg, ok) {
+    card.innerHTML = ""; let on = false; try { on = (await api("/api/va-access")).enabled; } catch (e) { /* shown as off */ }
+    const pw = el("input", { type: "password", placeholder: on ? "New VA password (signs the VA out)" : "Choose a VA password (6+ characters)", autocomplete: "new-password", "aria-label": "VA password" });
+    const note = el("div", { class: "notice " + (ok ? "ok" : "err"), text: msg || "" });
+    card.appendChild(el("div", { class: "row" }, [el("div", { style: "font-weight:500", text: "VA access" }), el("span", { class: "rchip", style: on ? "color:var(--green);border-color:var(--green)" : "", text: on ? "On" : "Off" })]));
+    card.appendChild(el("div", { class: "muted", style: "margin:6px 0 10px", text: "The VA signs in with this password and sees only the call list (no-shows and cancellations from every shop), tomorrow's confirmations and their own results. They can't see pay, the audit or anything else." }));
+    card.appendChild(el("div", { class: "field" }, [pw]));
+    card.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [
+      el("button", { class: "primary", "data-act": "va-set", style: "padding:10px 18px", text: on ? "Change VA password" : "Turn on", onclick: async () => { try { await api("/api/va-access", { method: "POST", body: JSON.stringify({ password: pw.value }) }); await draw("Saved. Give the VA this password.", true); } catch (e) { await draw(e.message || "Couldn't save that.", false); } } }),
+      el("button", { class: "ghost", "data-act": "va-open", text: "Open the VA screens", onclick: () => { currentTab = "va"; render(); } }),
+      on ? el("button", { class: "ghost", "data-act": "va-off", text: "Turn off", onclick: async () => { if (!confirm("Turn off VA access? The VA will be signed out.")) return; await api("/api/va-access", { method: "DELETE" }); await draw(); } }) : null].filter(Boolean)));
+    card.appendChild(note);
+  }
+  await draw();
+}
+
 function renderTeam(app) {
   app.appendChild(el("div", { class: "header" }, [el("div", { class: "title oswald", style: "flex:1", text: "SBN Sales Team" }), el("button", { class: "ghost", "data-act": "logout", text: "Log out", onclick: async () => { await api("/api/logout", { method: "POST" }); await boot(); } })]));
   const content = el("div"); app.appendChild(content); renderFind(content);
@@ -260,6 +333,7 @@ function renderPage(content) {
 
 async function renderSettings(content) {
   renderTeamAccessCard(content);
+  renderVAAccessCard(content);
   const list = el("div", { style: "margin-bottom:16px" });
   async function loadList() {
     const locs = await api("/api/locations");

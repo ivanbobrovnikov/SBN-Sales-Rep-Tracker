@@ -95,3 +95,9 @@ th { font-weight: 600; }
 .more-sheet { border-top-color: var(--edge); }
 .more-sheet-item.active { border-color: var(--acc); }
 .more-sheet-item.active .more-ico { color: var(--acc); }
+.rchip { display: inline-flex; align-items: center; font-size: 12.5px; font-weight: 500; padding: 3px 11px; border-radius: 999px; border: 1px solid var(--border); color: var(--sub); white-space: nowrap; }
+input[type=search] { -webkit-appearance: none; appearance: none; }
+
+/* the VA's call and text buttons: the first thing they tap, so they must be the easiest thing to see */
+a.va-btn { display: inline-flex; align-items: center; gap: 6px; padding: 9px 16px; min-height: 42px; border-radius: 9px; border: 1px solid var(--border); background: transparent; color: var(--text); text-decoration: none; font-weight: 500; font-size: 14px; }
+a.va-call { background: var(--green); color: #06210f; border-color: transparent; font-weight: 700; }
