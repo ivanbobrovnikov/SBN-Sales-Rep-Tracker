@@ -83,12 +83,19 @@ end function
 ' where to find the sound the tracker chose for a deal ("" = stay quiet)
 function tv_soundPath(sound as dynamic, have as object) as string
     if sound = invalid then return ""
-    if sound.kind = "builtin" then return "pkg:/sounds/" + sound.key + ".wav"
+    if sound.kind = "builtin" then return tv_builtinPath(sound.key, have)
     if sound.kind = "custom"
         if have.DoesExist(sound.id) then return "tmp:/tv_" + sound.id + ".wav"
-        if sound.fallback <> invalid then return "pkg:/sounds/" + sound.fallback + ".wav"
+        if sound.fallback <> invalid then return tv_builtinPath(sound.fallback, have)
     end if
     return ""
+end function
+
+' The built-in sounds are copied into the TV's temporary storage when the app starts and played from there: that is where the owner's own sounds play from,
+' and those play fine, while the same kind of file played straight out of the app package kept failing. If a copy didn't work, the package copy is used as before.
+function tv_builtinPath(key as string, have as object) as string
+    if have.DoesExist("b_" + key) then return "tmp:/b_" + key + ".wav"
+    return "pkg:/sounds/" + key + ".wav"
 end function
 
 ' the TV shows the top six reps (the text is big, so that is what fits); 0 means "none"
