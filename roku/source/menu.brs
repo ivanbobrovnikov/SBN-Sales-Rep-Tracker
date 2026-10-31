@@ -30,17 +30,29 @@ function L_copy(d as object) as object
 end function
 
 ' anything that arrives from the tracker or the TV's memory is checked before it is used, so a bad value can never blank the screen
+' A true/false can reach the TV under two names: "Boolean", or "roBoolean" (the same thing, boxed, which is how values that come out of JSON can be reported on a real Roku). Both count.
+function L_isBool(v as dynamic) as boolean
+    t = type(v)
+    return t = "Boolean" or t = "roBoolean"
+end function
+
+' Reads a true/false whichever kind it is. A boxed one (roBoolean) is read with its own GetBoolean(); a plain one is just compared.
+function L_boolVal(v as dynamic) as boolean
+    if type(v) = "roBoolean" then return v.GetBoolean()
+    return v = true
+end function
+
 function tv_cleanDisplay(raw as dynamic) as object
     d = tv_displayDefaults()
     if raw = invalid then return d
     if type(raw) <> "roAssociativeArray" then return d
     if raw.layout <> invalid and L_inList(tv_layoutIds(), raw.layout) then d.layout = raw.layout
-    if raw.rotate <> invalid and type(raw.rotate) = "Boolean" then d.rotate = raw.rotate
-    if raw.photos <> invalid and type(raw.photos) = "Boolean" then d.photos = raw.photos
-    if raw.commission <> invalid and type(raw.commission) = "Boolean" then d.commission = raw.commission
-    if raw.banner <> invalid and type(raw.banner) = "Boolean" then d.banner = raw.banner
-    if raw.sound <> invalid and type(raw.sound) = "Boolean" then d.sound = raw.sound
-    if raw.confetti <> invalid and type(raw.confetti) = "Boolean" then d.confetti = raw.confetti
+    if L_isBool(raw.rotate) then d.rotate = L_boolVal(raw.rotate)
+    if L_isBool(raw.photos) then d.photos = L_boolVal(raw.photos)
+    if L_isBool(raw.commission) then d.commission = L_boolVal(raw.commission)
+    if L_isBool(raw.banner) then d.banner = L_boolVal(raw.banner)
+    if L_isBool(raw.sound) then d.sound = L_boolVal(raw.sound)
+    if L_isBool(raw.confetti) then d.confetti = L_boolVal(raw.confetti)
     if raw.textSize = "large" then d.textSize = "large"
     if raw.volume = "low" or raw.volume = "medium" or raw.volume = "high" then d.volume = raw.volume
     if raw.rotateSeconds <> invalid
@@ -119,8 +131,8 @@ function tv_menuChange(d as object, key as string, dir as integer) as object
         n.textSize = L_cycle(["normal", "large"], d.textSize, dir)
     else if key = "volume"
         n.volume = L_cycle(["low", "medium", "high"], d.volume, dir)
-    else if d[key] <> invalid and type(d[key]) = "Boolean"
-        n[key] = not d[key]
+    else if L_isBool(d[key])
+        n[key] = not L_boolVal(d[key])
     end if
     return n
 end function
