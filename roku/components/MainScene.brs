@@ -80,6 +80,8 @@ sub init()
     m.confettiOn = m.display.confetti
     m.volume = tv_menuVolume(m.display.volume)
     m.rotateTimer.observeField("fire", "onRotate")
+    m.badLayouts = {}          ' layouts that could not be drawn on this TV: skipped from then on
+    m.shownLayouts = {}        ' layouts that have drawn successfully this session (each is reported once)
     m.sendTimer.observeField("fire", "flushDisplay")
     m.top.setFocus(true)
     m.pollTimer.observeField("fire", "pollNow")
@@ -116,6 +118,7 @@ sub init()
     report("started", "SBN Leaderboard 1.2 on " + tv_text(di.GetModelDisplayName()) + " (" + tv_text(di.GetModel()) + ") Roku OS " + osText)
     copyBuiltinSounds()
     checkSounds()
+    startRotation()          ' if rotation was already on when the app started, it has to start now: nothing "changes" at launch, so nothing else would start it
     pollNow()
 end sub
 
@@ -266,6 +269,9 @@ end function
 
 sub tickClock()
     m.secs = m.secs + 1
+    if m.secs mod 5 = 0 and m.currentLayout <> "classic" and m.lastFeed <> invalid and not m.menuOpen        ' a safety net: a layout that is on but has nothing on the screen is never left that way
+        if m.stageGroup.getChildCount() = 0 then layoutFailed("the screen was empty")
+    end if
     if m.secs mod 60 = 0
         m.tick = m.tick + 1
         if m.currentLayout = "ambient" and m.lastFeed <> invalid and not m.menuOpen then drawStage()      ' the ambient board drifts a few pixels each minute
@@ -855,6 +861,7 @@ sub applyLayoutChrome()
     end for
     if not classic then m.emptyLabel.visible = false
     m.stageGroup.visible = not classic
+    m.stageGroup.opacity = 1.0
 end sub
 
 sub drawBoard()
@@ -873,19 +880,52 @@ end sub
 
 sub drawStage()
     if m.lastFeed = invalid then return
-    st = tv_stage(m.currentLayout, m.lastFeed, m.display, m.havePhoto, m.tick)
+    try
+        st = tv_stage(m.currentLayout, m.lastFeed, m.display, m.havePhoto, m.tick)
+        clearGroup(m.stageGroup)
+        buildItems(m.stageGroup, st.items)
+        if st.dim
+            m.logoNode.opacity = 0.4
+            m.clockLabel.color = "0x5A6A8CFF"
+        else
+            m.logoNode.opacity = 1.0
+            m.clockLabel.color = "0xA9BBDCFF"
+        end if
+        drawn = m.stageGroup.getChildCount()
+        if drawn = 0
+            layoutFailed("nothing was drawn")
+        else
+            noteLayoutOk(drawn)
+        end if
+    catch e
+        why = "an error"
+        if e <> invalid and e.message <> invalid then why = e.message
+        layoutFailed(why)
+    end try
+end sub
+
+' A layout that fails (an error, or nothing drawn) must never leave the TV blank: go back to the Classic board at once, skip that layout from now on, and tell the tracker why.
+sub layoutFailed(why as string)
+    bad = m.currentLayout
+    if bad = "classic" then return
+    print "TV> layout " + bad + " could not be shown: " + why
+    m.badLayouts[bad] = true
+    report("layout_failed", bad + " could not be drawn on this TV (" + why + "). It shows the Classic board instead and skips " + bad + " from now on.")
+    m.currentLayout = "classic"
+    m.rowsSig = "(nothing drawn yet)"
     clearGroup(m.stageGroup)
-    buildItems(m.stageGroup, st.items)
-    if st.dim
-        m.logoNode.opacity = 0.4
-        m.clockLabel.color = "0x5A6A8CFF"
-    else
-        m.logoNode.opacity = 1.0
-        m.clockLabel.color = "0xA9BBDCFF"
-    end if
+    drawBoard()
+end sub
+
+sub noteLayoutOk(n as integer)
+    id = m.currentLayout
+    if m.shownLayouts.DoesExist(id) then return
+    m.shownLayouts[id] = true
+    report("layout_ok", id + " drew " + n.ToStr() + " things on screen")
 end sub
 
 sub setLayout(id as string)
+    if m.badLayouts.DoesExist(id) then id = "classic"      ' a layout that failed on this TV is not tried again
     m.currentLayout = id
     if id = "classic" then m.rowsSig = "(nothing drawn yet)"      ' the classic rows were not kept up to date while hidden: draw them again
     drawBoard()
@@ -897,6 +937,7 @@ sub startRotation()
     if m.display.rotate and m.display.layouts.Count() > 1
         m.rotateTimer.duration = m.display.rotateSeconds
         m.rotateTimer.control = "start"
+        report("rotation", "on: " + m.display.layouts.Count().ToStr() + " layouts, a new one every " + m.display.rotateSeconds.ToStr() + " seconds")
     else if m.currentLayout <> m.display.layout
         setLayout(m.display.layout)
     end if
@@ -905,7 +946,7 @@ end sub
 sub onRotate()
     if m.menuOpen then return
     if not m.display.rotate then return
-    setLayout(tv_rotateNext(m.display, m.currentLayout))
+    setLayout(tv_rotateNextGood(m.display, m.currentLayout, m.badLayouts))
 end sub
 
 ' ---- settings coming from the tracker (a change made on the phone) ----

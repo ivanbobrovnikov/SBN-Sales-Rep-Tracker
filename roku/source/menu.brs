@@ -148,6 +148,16 @@ function tv_menuAction(d as object, key as string) as object
 end function
 
 ' the next layout in the rotation after the one on screen
+' the next layout in the rotation, skipping any that failed to draw on this TV. If every one has failed, the Classic board.
+function tv_rotateNextGood(d as object, current as string, bad as object) as string
+    nxt = current
+    for i = 1 to d.layouts.Count()
+        nxt = tv_rotateNext(d, nxt)
+        if not bad.DoesExist(nxt) then return nxt
+    end for
+    return "classic"
+end function
+
 function tv_rotateNext(d as object, current as string) as string
     list = d.layouts
     if list.Count() = 0 then return current
