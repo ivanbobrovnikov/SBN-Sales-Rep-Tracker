@@ -717,7 +717,7 @@ async function renderSettings(content) {
     sel.addEventListener("change", () => saveSetting({ defaultSound: sel.value }));
     vol.addEventListener("change", () => saveSetting({ volume: vol.value }));
     // what the TV shows: one set of options, shared with the menu on the TV itself (press * on the remote)
-    const LAYOUT_NAMES = { classic: "Classic board", podium: "Podium", race: "Race to the goal", scoreboard: "Scoreboard", spotlight: "Spotlight", rings: "Goal rings", feed: "Live feed", cards: "The team", ambient: "Ambient (dim, top three)" };
+    const LAYOUT_NAMES = { classic: "Classic board", podium: "Podium", race: "Race to the goal", scoreboard: "Scoreboard", month: "This month (total closed)", spotlight: "Spotlight", rings: "Goal rings", feed: "Live feed", cards: "The team", ambient: "Ambient (dim, top three)" };
     const dsp = tv.display || {}, saveDisplay = (d) => saveSetting({ display: d });
     const pick = (key, choices) => { const s = el("select", { "data-field": "tv-" + key, style: "width:100%;margin-bottom:8px" }, choices.map(([v, t]) => opt(String(v), t))); s.value = String(dsp[key]); s.addEventListener("change", () => saveDisplay({ [key]: typeof choices[0][0] === "number" ? Number(s.value) : s.value })); return s; };
     const yesNo = (key, label) => { const s = el("select", { "data-field": "tv-" + key, style: "width:100%;margin-bottom:8px" }, [opt("on", label + ": on"), opt("off", label + ": off")]); s.value = dsp[key] === false ? "off" : "on"; s.addEventListener("change", () => saveDisplay({ [key]: s.value === "on" })); return s; };

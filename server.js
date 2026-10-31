@@ -644,6 +644,30 @@ async function buildTvBase(db) {
   return { rows, closes, totals, unreachable: Array.from(new Set([...closing.errors, ...arrival.errors].map((e) => e.locationName))) };
 }
 
+// ---- "This month": the month's closed value, all shops together. There is a lot more to add up than for today, so it is asked for separately, remembered for a couple of
+// minutes and refreshed in the background. The TV never waits on it (only the very first request, once, for at most 2.5 seconds).
+const TV_MONTH_REFRESH_MS = Number(process.env.TV_MONTH_REFRESH_MS) || 2 * 60 * 1000, TV_MONTH_MAX_AGE_MS = 30 * 60 * 1000;     // (the interval can be shortened for testing)
+let tvMonthCache = { at: 0, data: null }, tvMonthBuilding = null;
+async function buildTvMonth(db) {
+  const now = new Date(), today = easternDay(now);
+  const st = await buildCombinedStats(db, { period: "month", date: today, dateBasis: "closed" });
+  const cents = (n) => Math.round((Number(n) || 0) * 100);
+  const reps = (st.perRep || []).map((r) => ({ name: r.name, initials: repInitials(r.name), color: repColor(r.name), closedCents: cents(r.closedValue), closeCount: r.closeCount || 0 }))
+    .filter((r) => r.closedCents > 0 || r.closeCount > 0).sort((a, b) => b.closedCents - a.closedCents || b.closeCount - a.closeCount || a.name.localeCompare(b.name)).map((r, i) => ({ rank: i + 1, ...r }));
+  return { label: new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", month: "long", year: "numeric" }).format(now), day: today,
+    closedCents: reps.reduce((a, r) => a + r.closedCents, 0), closeCount: reps.reduce((a, r) => a + r.closeCount, 0), repCount: reps.length, rows: reps.slice(0, 8),
+    unreachable: Array.from(new Set((st.errors || []).map((e) => e.locationName))) };
+}
+function tvMonthFresh() {
+  if (tvMonthBuilding) return tvMonthBuilding;
+  tvMonthBuilding = buildTvMonth(loadDB()).then((data) => { tvMonthCache = { at: Date.now(), data }; return data; }).finally(() => { tvMonthBuilding = null; });
+  return tvMonthBuilding;
+}
+async function tvMonthEnsure() {
+  const age = Date.now() - tvMonthCache.at, wrongMonth = tvMonthCache.data && String(tvMonthCache.data.day).slice(0, 7) !== easternDay(new Date()).slice(0, 7);
+  if (!tvMonthCache.data || wrongMonth || age > TV_MONTH_MAX_AGE_MS) { try { await Promise.race([tvMonthFresh(), new Promise((r) => setTimeout(r, 2500))]); } catch (e) { /* no month yet: the TV just says so */ } }
+  else if (age > TV_MONTH_REFRESH_MS) tvMonthFresh().catch(() => {});
+}
 // The shop answers (the slow part) are kept apart from everything that comes from YOUR settings (sounds, volume, confetti, test button, photos, the clock),
 // which is added fresh every time, so a change in Settings reaches the TV at once even when the shop answers are a little old.
 function assembleTvFeed(db, base, stale) {
@@ -656,7 +680,7 @@ function assembleTvFeed(db, base, stale) {
   if (settings.defaultSound === "random" || settings.defaultSound === "custom-random") ready.forEach((id) => need.add(id));
   else if (typeof settings.defaultSound === "string" && settings.defaultSound.indexOf("custom:") === 0 && ready.includes(settings.defaultSound.slice(7))) need.add(settings.defaultSound.slice(7));
   db.repSounds.forEach((r) => { if (r.choice.indexOf("custom:") === 0 && ready.includes(r.choice.slice(7))) need.add(r.choice.slice(7)); });
-  return { now: new Date(now).toISOString(), clock: { h: parts.hour || 0, m: parts.minute || 0, s: parts.second || 0 }, volume: TV_VOLUMES[settings.volume] || 70, soundMethod: settings.soundMethod || "auto", confetti: settings.confetti !== false, display: tvDisplayView(settings), totals: base.totals, test: { seq: db.tv.test.seq || 0, sound: db.tv.test.sound }, rows, closes, customSounds: Array.from(need), unreachable: base.unreachable, ...(stale ? { stale: true } : {}) };
+  return { now: new Date(now).toISOString(), clock: { h: parts.hour || 0, m: parts.minute || 0, s: parts.second || 0 }, volume: TV_VOLUMES[settings.volume] || 70, soundMethod: settings.soundMethod || "auto", confetti: settings.confetti !== false, display: tvDisplayView(settings), month: (tvMonthCache.data && String(tvMonthCache.data.day).slice(0, 7) === easternDay(new Date(now)).slice(0, 7)) ? { ...tvMonthCache.data, rows: tvMonthCache.data.rows.map((r) => ({ ...r, photo: photoOf(r.name) })) } : null, totals: base.totals, test: { seq: db.tv.test.seq || 0, sound: db.tv.test.sound }, rows, closes, customSounds: Array.from(need), unreachable: base.unreachable, ...(stale ? { stale: true } : {}) };
 }
 // Asking the shops can be slow (a shop that is waking up, or busy). The TV gives up on a refresh after a while, so:
 //  - only ONE round of questions is ever in progress; a second TV request joins it instead of starting another
@@ -679,6 +703,7 @@ function tvBaseFresh() {
 }
 app.get("/api/tv/feed", tvAuth, async (req, res) => {
   tvLastSeenAt = Date.now();
+  await tvMonthEnsure().catch(() => {});
   try {
     const building = tvBaseFresh(), haveOlder = tvBaseCache.data && Date.now() - tvBaseCache.at < TV_FEED_MAX_AGE_MS;
     let base = haveOlder ? await Promise.race([building, new Promise((resolve) => setTimeout(() => resolve(null), TV_FEED_WAIT_MS))]) : await building;
@@ -725,7 +750,7 @@ app.put("/api/tv/settings", requireOwner, (req, res) => {
 
 // ---- what the TV shows: the layout, rotating between layouts, photos, text size ... ----
 // One set of options, kept here: the TV's own menu (press * on the remote) and this Settings screen both change the same thing, and the TV reads it with every refresh.
-const TV_LAYOUTS = ["classic", "podium", "race", "scoreboard", "spotlight", "rings", "feed", "cards", "ambient"];
+const TV_LAYOUTS = ["classic", "podium", "race", "scoreboard", "month", "spotlight", "rings", "feed", "cards", "ambient"];
 const TV_DISPLAY_DEFAULTS = { layout: "classic", rotate: false, rotateSeconds: 30, layouts: TV_LAYOUTS.slice(), photos: true, commission: true, banner: true, sound: true, textSize: "normal" };
 // Checks whatever the TV or the owner sent and returns only the valid parts, or an error that names the problem. Anything unknown is ignored.
 function tvDisplayCheck(b) {
@@ -747,7 +772,9 @@ function tvDisplayApply(db, clean) {
   for (const k of ["layout", "rotate", "rotateSeconds", "layouts", "photos", "commission", "banner", "sound", "textSize"]) if (clean[k] !== undefined) d[k] = clean[k];
   st.display = d; if (clean.confetti !== undefined) st.confetti = clean.confetti; if (clean.volume !== undefined) st.volume = clean.volume;
 }
-const tvDisplayView = (st) => Object.assign({}, TV_DISPLAY_DEFAULTS, st.display || {}, { layouts: ((st.display || {}).layouts || TV_LAYOUTS).slice(), confetti: st.confetti !== false, volume: st.volume || "medium" });
+// A rotation list that already had every earlier layout in it simply gets the new "This month" screen too. A list the owner trimmed by hand is left exactly as it is.
+const tvLayoutsView = (list) => { const l = (list || TV_LAYOUTS).slice(), older = TV_LAYOUTS.filter((x) => x !== "month"); return older.every((x) => l.includes(x)) && !l.includes("month") ? TV_LAYOUTS.slice() : l; };
+const tvDisplayView = (st) => Object.assign({}, TV_DISPLAY_DEFAULTS, st.display || {}, { layouts: tvLayoutsView((st.display || {}).layouts), confetti: st.confetti !== false, volume: st.volume || "medium" });
 let tvDisplayTimes = [];
 app.post("/api/tv/display", tvAuth, (req, res) => {
   const now = Date.now(); tvDisplayTimes = tvDisplayTimes.filter((t) => now - t < 60000);

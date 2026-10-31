@@ -245,6 +245,53 @@ function L_scoreboard(rows as object, totals as object, d as object, have as obj
     return items
 end function
 
+' ---------------------------------------------------------------- THIS MONTH: the total value closed so far this month, all locations, and who closed it
+function L_month(month as dynamic, d as object, have as object) as object
+    if month = invalid
+        items = L_head("THIS MONTH", "All locations", d)
+        items.Push(L_t(100, 480, 1720, 90, "Getting this month's total...", "0x7F8CA6FF", "semibold", 56, "center", "center"))
+        return items
+    end if
+    items = L_head("THIS MONTH", month.label + "  -  all locations", d)
+    items.Push(L_t(100, 222, 800, 40, "CLOSED THIS MONTH", "0x8393B2FF", "semibold", 32, "left", "center"))
+    items.Push(L_t(90, 262, 1180, 300, tv_moneyShort(month.closedCents), "0xF2F5FBFF", "bold", 250, "left", "center"))
+    items.Push(L_r(1360, 258, 460, 150, "0x111A30FF"))
+    items.Push(L_t(1388, 270, 400, 36, "DEALS CLOSED", "0x8393B2FF", "semibold", 26, "left", "center"))
+    items.Push(L_t(1388, 300, 400, 104, month.closeCount.ToStr(), "0x7FA8FFFF", "bold", 84, "left", "center"))
+    items.Push(L_r(1360, 424, 460, 150, "0x111A30FF"))
+    items.Push(L_t(1388, 436, 400, 36, "AVERAGE DEAL", "0x8393B2FF", "semibold", 26, "left", "center"))
+    avg = "-"
+    if month.closeCount > 0 then avg = tv_moneyShort(month.closedCents \ month.closeCount)
+    items.Push(L_t(1388, 466, 420, 104, avg, "0x3DDC97FF", "bold", 84, "left", "center"))
+    rows = month.rows
+    if rows = invalid then rows = []
+    n = rows.Count()
+    if n > 5 then n = 5
+    for i = 0 to n - 1
+        r = rows[i]
+        x = 100 + i * 348
+        items.Push(L_r(x, 650, 328, 350, "0x111A30FF"))
+        items.Push(L_r(x, 650, 328, 6, L_color(r)))
+        items.Push(L_i(x + 18, 680, 48, 48, "pkg:/images/circle.png", tv_rankColor(i)))
+        items.Push(L_t(x + 18, 680, 48, 48, (i + 1).ToStr(), "0xFFFFFFFF", "semibold", 26, "center", "center"))
+        items.Push(L_t(x + 80, 676, 236, 56, r.name, "0xF2F5FBFF", "semibold", L_nameSize(r.name, L_z(34, d)), "left", "center"))
+        items.Push(L_t(x + 18, 760, 296, 90, tv_moneyShort(r.closedCents), "0x7FA8FFFF", "bold", L_z(66, d), "left", "center"))
+        items.Push(L_t(x + 18, 860, 296, 36, L_plural(r.closeCount, "deal", "deals"), "0x8393B2FF", "semibold", 28, "left", "center"))
+        if month.closedCents > 0 then items.Push(L_t(x + 18, 896, 296, 36, Int((r.closedCents * 100#) / month.closedCents).ToStr() + "% of the month", "0x8393B2FF", "semibold", 28, "left", "center"))
+    end for
+    if n = 0 then items.Push(L_t(100, 760, 1720, 80, "No closes yet this month", "0x7F8CA6FF", "semibold", 52, "center", "center"))
+    miss = month.unreachable
+    if miss <> invalid and miss.Count() > 0
+        names = ""
+        for each shopName in miss
+            if names <> "" then names = names + ", "
+            names = names + shopName
+        end for
+        items.Push(L_t(100, 1022, 1720, 36, "Not counted (no answer): " + names, "0xF5A524FF", "semibold", 26, "left", "center"))
+    end if
+    return items
+end function
+
 ' a font size that keeps a long name inside its box
 function L_nameSize(name as string, base as integer) as integer
     n = Len(name)
@@ -461,7 +508,7 @@ end function
 
 ' ---------------------------------------------------------------- the list of layouts, and the one place that picks which to draw
 function tv_layoutIds() as object
-    return ["classic", "podium", "race", "scoreboard", "spotlight", "rings", "feed", "cards", "ambient"]
+    return ["classic", "podium", "race", "scoreboard", "month", "spotlight", "rings", "feed", "cards", "ambient"]
 end function
 
 function tv_layoutName(id as string) as string
@@ -469,6 +516,7 @@ function tv_layoutName(id as string) as string
     if id = "podium" then return "Podium"
     if id = "race" then return "Race to the goal"
     if id = "scoreboard" then return "Scoreboard"
+    if id = "month" then return "This month"
     if id = "spotlight" then return "Spotlight"
     if id = "rings" then return "Goal rings"
     if id = "feed" then return "Live feed"
@@ -488,6 +536,7 @@ function tv_stage(layout as string, feed as object, d as object, have as object,
     if layout = "podium" then return { items: L_podium(rows, totals, d, have), dim: false }
     if layout = "race" then return { items: L_race(rows, totals, d, have), dim: false }
     if layout = "scoreboard" then return { items: L_scoreboard(rows, totals, d, have), dim: false }
+    if layout = "month" then return { items: L_month(feed.month, d, have), dim: false }
     if layout = "spotlight" then return { items: L_spotlight(rows, totals, d, have), dim: false }
     if layout = "rings" then return { items: L_rings(rows, totals, d, have), dim: false }
     if layout = "feed" then return { items: L_feed(rows, closes, d, have), dim: false }

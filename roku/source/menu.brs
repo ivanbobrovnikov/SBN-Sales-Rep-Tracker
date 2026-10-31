@@ -217,16 +217,16 @@ function tv_menuStage(d as object, sel as integer) as object
     ids = tv_layoutIds()
     for i = 0 to ids.Count() - 1
         id = ids[i]
-        x = 400 + (i mod 3) * 372
-        y = 130 + (i \ 3) * 160
+        x = 358 + (i mod 4) * 304
+        y = 126 + (i \ 4) * 134
         cur = (id = d.layout)
         border = "0x25324FFF"
         if cur then border = "0x3B82F6FF"
-        items.Push(L_r(x, y, 340, 148, border))
-        items.Push(L_i(x + 4, y + 4, 332, 140, "pkg:/images/thumb_" + id + ".png", ""))
-        items.Push(L_r(x + 4, y + 104, 332, 40, "0x070D1CD9"))
-        items.Push(L_t(x + 12, y + 104, 240, 40, tv_layoutName(id), "0xF2F5FBFF", "semibold", 26, "left", "center"))
-        if L_inList(d.layouts, id) and d.rotate then items.Push(L_t(x + 250, y + 104, 80, 40, "ROTATES", "0x3DDC97FF", "semibold", 18, "right", "center"))
+        items.Push(L_r(x, y, 292, 122, border))
+        items.Push(L_i(x + 4, y + 4, 284, 114, "pkg:/images/thumb_" + id + ".png", ""))
+        items.Push(L_r(x + 4, y + 82, 284, 36, "0x070D1CD9"))
+        items.Push(L_t(x + 12, y + 82, 184, 36, tv_layoutName(id), "0xF2F5FBFF", "semibold", 22, "left", "center"))
+        if L_inList(d.layouts, id) and d.rotate then items.Push(L_t(x + 198, y + 82, 84, 36, "ROTATES", "0x3DDC97FF", "semibold", 16, "right", "center"))
     end for
     rows = tv_menuRows(d)
     for i = 0 to rows.Count() - 1
