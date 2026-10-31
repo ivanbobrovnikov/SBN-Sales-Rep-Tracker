@@ -383,6 +383,60 @@ function renderPage(content) {
   if (currentTab === "settings") return renderSettings(content);
 }
 
+// Revenue for all locations together. It sits at the very bottom of Settings, closed, behind its OWN passcode (everyone shares the one login, so the login alone doesn't open it).
+// While it is locked nothing about the numbers is on the page or sent to it.
+function renderRevenueCard(content) {
+  const box = el("div", { class: "card", "data-part": "revenue-card" }), body = el("div", { "data-part": "revenue-body", style: "display:none;margin-top:12px" });
+  let open = false;
+  const lockNow = () => api("/api/revenue/lock", { method: "POST" }).catch(() => {});
+  const toggle = el("button", { class: "ghost", "data-act": "revenue-toggle", style: "width:100%;text-align:left;font-size:13px;color:var(--sub)", text: "\u{1F512} Revenue (passcode)", onclick: async () => { open = !open; body.style.display = open ? "block" : "none"; if (open) await show(); else { body.innerHTML = ""; lockNow(); } } });
+  box.appendChild(toggle); box.appendChild(body); content.appendChild(box);
+  const note = (t, c) => el("div", { "data-part": "revenue-msg", style: "font-size:13px;min-height:16px;margin-top:6px;color:" + (c || "var(--sub)"), text: t || "" });
+  const field = (ph, key) => el("input", { type: "password", placeholder: ph, "data-field": key, autocomplete: "off", style: "width:100%;margin-bottom:8px" });
+  async function show() {
+    body.innerHTML = ""; let st; try { st = await api("/api/revenue/status"); } catch (e) { body.appendChild(note(e.message, "var(--red)")); return; }
+    if (!st.set) return setupForm(); if (!st.unlocked) return lockedForm(st); return report();
+  }
+  function setupForm() {
+    const p1 = field("Choose a passcode (6 or more characters)", "rev-new"), p2 = field("Type it again", "rev-new2"), m = note("");
+    const go = async () => { if (p1.value !== p2.value) { m.textContent = "The two don't match."; m.style.color = "var(--red)"; return; } try { await api("/api/revenue/setup", { method: "POST", body: JSON.stringify({ passcode: p1.value }) }); await show(); } catch (e) { m.textContent = e.message; m.style.color = "var(--red)"; } };
+    body.appendChild(el("div", { class: "muted", style: "font-size:13px;margin-bottom:8px", text: "Revenue for all your locations, behind a passcode only you know. Choose it now. Anyone who has this login will otherwise be able to." }));
+    body.appendChild(p1); body.appendChild(p2); body.appendChild(el("button", { class: "primary", "data-act": "revenue-setup", text: "Set passcode", onclick: go })); body.appendChild(m);
+  }
+  function lockedForm(st) {
+    const p = field("Passcode", "rev-pass"), m = note(st.waitMinutes > 0 ? `Too many wrong tries. Try again in ${st.waitMinutes} minute${st.waitMinutes === 1 ? "" : "s"}.` : "", "var(--red)");
+    const go = async () => { m.textContent = ""; try { await api("/api/revenue/unlock", { method: "POST", body: JSON.stringify({ passcode: p.value }) }); await show(); } catch (e) { p.value = ""; m.textContent = e.message; m.style.color = "var(--red)"; } };
+    p.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+    body.appendChild(p); body.appendChild(el("button", { class: "primary", "data-act": "revenue-unlock", text: "Unlock", onclick: go })); body.appendChild(m);
+  }
+  async function report() {
+    const todayET = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+    const per = el("select", { "data-field": "rev-period", style: "width:100%;margin-bottom:8px" }, [["day", "Day"], ["week", "Week"], ["month", "Month"], ["year", "Year"], ["custom", "Custom range"]].map(([v, t]) => el("option", { value: v, text: t })));
+    per.value = "month";
+    const date = el("input", { type: "date", value: todayET, "data-field": "rev-date", style: "width:100%;margin-bottom:8px" }), d1 = el("input", { type: "date", value: todayET.slice(0, 8) + "01", "data-field": "rev-start", style: "width:100%;margin-bottom:8px" }), d2 = el("input", { type: "date", value: todayET, "data-field": "rev-end", style: "width:100%;margin-bottom:8px" });
+    const out = el("div", { "data-part": "revenue-out" }), fmt = (d) => new Date(d + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    const sync = () => { const c = per.value === "custom"; date.style.display = c ? "none" : ""; d1.style.display = d2.style.display = c ? "" : "none"; }; sync();
+    async function load() {
+      out.innerHTML = ""; out.appendChild(el("div", { class: "muted", style: "font-size:13px", text: "Adding it up..." }));
+      let r; try { r = await api(`/api/revenue/report?period=${per.value}&date=${date.value}&startDate=${d1.value}&endDate=${d2.value}`); } catch (e) { if (/Locked|passcode/i.test(e.message)) { await show(); return; } out.innerHTML = ""; out.appendChild(note(e.message, "var(--red)")); return; }
+      out.innerHTML = "";
+      const label = r.range ? (r.range.start === r.range.end ? fmt(r.range.start) : `${fmt(r.range.start)} to ${fmt(r.range.end)}`) : "";
+      out.appendChild(el("div", { class: "muted", style: "font-size:12px;letter-spacing:0.04em", text: "TOTAL REVENUE, ALL LOCATIONS" + (label ? " \u00B7 " + label.toUpperCase() : "") }));
+      out.appendChild(el("div", { "data-part": "revenue-total", style: "font-size:44px;font-weight:700;margin:6px 0 2px", text: money(r.total.revenue) }));
+      out.appendChild(el("div", { class: "muted", style: "font-size:13px;margin-bottom:10px", text: `${r.total.paidJobs} paid job${r.total.paidJobs === 1 ? "" : "s"} \u00B7 ${money(r.total.upsellRevenue)} of it from upsells` }));
+      r.locations.forEach((l) => out.appendChild(el("div", { class: "row", "data-part": "revenue-location", style: "padding:8px 0;border-top:1px solid var(--line);gap:10px;align-items:baseline" }, [el("div", { style: "flex:1;min-width:0" }, [el("div", { text: l.name }), el("div", { class: "muted", style: "font-size:12px;" + (l.ok ? "" : "color:var(--warn)"), text: l.ok ? `${l.paidJobs} paid job${l.paidJobs === 1 ? "" : "s"}` : l.error })]), el("b", { style: "font-size:18px", text: l.ok ? money(l.revenue) : "not counted" })])));
+      if (r.partial) out.appendChild(el("div", { "data-part": "revenue-partial", style: "font-size:13px;margin-top:8px;color:var(--warn)", text: "A location didn't answer, so the total above doesn't include it." }));
+      out.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-top:10px", text: "Money actually collected: jobs marked paid (base price plus upsells), the same as each location's Dashboard." }));
+    }
+    per.addEventListener("change", () => { sync(); load(); }); [date, d1, d2].forEach((i) => i.addEventListener("change", load));
+    const changeBox = el("div", { style: "display:none;margin-top:10px", "data-part": "revenue-change" }), cur = field("Current passcode", "rev-cur"), nw = field("New passcode (6 or more characters)", "rev-chg"), cm = note("");
+    changeBox.appendChild(cur); changeBox.appendChild(nw); changeBox.appendChild(el("button", { class: "ghost", "data-act": "revenue-change-save", text: "Save new passcode", onclick: async () => { cm.textContent = ""; try { await api("/api/revenue/change", { method: "POST", body: JSON.stringify({ current: cur.value, passcode: nw.value }) }); cur.value = ""; nw.value = ""; cm.textContent = "Passcode changed."; cm.style.color = "var(--green)"; } catch (e) { cm.textContent = e.message; cm.style.color = "var(--red)"; } } })); changeBox.appendChild(cm);
+    body.appendChild(per); body.appendChild(date); body.appendChild(d1); body.appendChild(d2); body.appendChild(out);
+    body.appendChild(el("div", { class: "row", style: "gap:8px;margin-top:12px;justify-content:flex-start" }, [el("button", { class: "ghost", "data-act": "revenue-lock", text: "Lock now", onclick: async () => { await lockNow(); await show(); } }), el("button", { class: "ghost", "data-act": "revenue-change-open", text: "Change passcode", onclick: () => { changeBox.style.display = changeBox.style.display === "none" ? "block" : "none"; } })]));
+    body.appendChild(changeBox); await load();
+  }
+}
+
 async function renderSettings(content) {
   renderVAAccessCard(content);                  // the VA is the only separate login: reps and the owner share one login and see everything
   const list = el("div", { style: "margin-bottom:16px" });
@@ -818,6 +872,7 @@ async function renderSettings(content) {
     pwNotice,
   ]));
   api("/api/password-status").then((s) => { if (s.resetVariableSet) pwWarn.style.display = "block"; }).catch(() => {});
+  renderRevenueCard(content);                     // the last thing on the page, closed and locked
 }
 
 async function renderCleanup(content) {

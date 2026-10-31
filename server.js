@@ -1155,4 +1155,61 @@ app.get("/api/rep/my-upsells", requireTeam, async (req, res) => {
   res.json({ upsells: out, total: Math.round(out.reduce((t, u) => t + (Number(u.price) || 0), 0) * 100) / 100 });
 });
 
+// ---------- Revenue for all locations: locked behind its OWN passcode ----------
+// The owner and the reps share one login, so the login alone must not open this. The passcode is kept as a salted hash, wrong tries are limited for everyone at once, an unlock
+// lasts 10 minutes (it renews while the screen is used, up to 2 hours) and belongs to the browser that entered it, and the numbers are only ever sent while unlocked.
+const REV_MAX_FAILS = 5, REV_LOCKOUT_MS = Number(process.env.REVENUE_LOCKOUT_MS) || 10 * 60 * 1000, REV_UNLOCK_MS = Number(process.env.REVENUE_UNLOCK_MS) || 10 * 60 * 1000, REV_UNLOCK_MAX_MS = 2 * 60 * 60 * 1000;
+let revFails = [];
+const revSid = (req) => crypto.createHash("sha256").update(String(req.cookies.session || "")).digest("hex").slice(0, 24);
+const revHash = (pass, saltHex) => crypto.scryptSync(String(pass), Buffer.from(saltHex, "hex"), 32).toString("hex");
+const revPassOk = (lock, pass) => { try { const a = Buffer.from(revHash(pass, lock.salt), "hex"), b = Buffer.from(lock.hash, "hex"); return a.length === b.length && crypto.timingSafeEqual(a, b); } catch (e) { return false; } };
+function revWaitMs() { const now = Date.now(); revFails = revFails.filter((t) => now - t < REV_LOCKOUT_MS); return revFails.length >= REV_MAX_FAILS ? revFails[0] + REV_LOCKOUT_MS - now : 0; }
+function revTokenFor(req, iat) { const payload = Buffer.from(JSON.stringify({ sid: revSid(req), iat: iat || Date.now(), exp: Date.now() + REV_UNLOCK_MS })).toString("base64"); return payload + "." + crypto.createHmac("sha256", SESSION_SECRET).update("rev:" + payload).digest("hex"); }
+function revUnlocked(req) {
+  const t = req.cookies.rev; if (!t || typeof t !== "string") return null; const [payload, sig] = t.split("."); if (!payload || !sig) return null;
+  if (sig !== crypto.createHmac("sha256", SESSION_SECRET).update("rev:" + payload).digest("hex")) return null;
+  let p; try { p = JSON.parse(Buffer.from(payload, "base64").toString("utf8")); } catch (e) { return null; }
+  const now = Date.now(); if (p.sid !== revSid(req) || !(now < p.exp) || !(now - p.iat < REV_UNLOCK_MAX_MS)) return null; return p;
+}
+const revGive = (req, res, iat) => res.cookie("rev", revTokenFor(req, iat), { httpOnly: true, sameSite: "strict", maxAge: REV_UNLOCK_MS });
+if (process.env.REVENUE_PASSCODE_RESET) { const d0 = loadDB(); if (d0.revenueLock) { delete d0.revenueLock; saveDB(d0); console.log("Revenue passcode cleared (REVENUE_PASSCODE_RESET is set). Remove that variable, then choose a new passcode."); } }
+app.get("/api/revenue/status", requireOwner, (req, res) => { res.set("Cache-Control", "no-store"); const lock = loadDB().revenueLock; res.json({ set: !!lock, unlocked: !!lock && !!revUnlocked(req), waitMinutes: Math.ceil(revWaitMs() / 60000) }); });
+app.post("/api/revenue/setup", requireOwner, (req, res) => {
+  const db = loadDB(), pass = String((req.body || {}).passcode || "");
+  if (db.revenueLock) return res.status(409).json({ error: "A passcode is already set." });
+  if (pass.length < 6 || pass.length > 64) return res.status(400).json({ error: "Use 6 to 64 characters." });
+  const salt = crypto.randomBytes(16).toString("hex"); db.revenueLock = { salt, hash: revHash(pass, salt), setAt: new Date().toISOString() }; saveDB(db); revGive(req, res); res.json({ ok: true });
+});
+app.post("/api/revenue/unlock", requireOwner, (req, res) => {
+  const lock = loadDB().revenueLock; if (!lock) return res.status(409).json({ error: "No passcode is set yet." });
+  const wait = revWaitMs(); if (wait > 0) return res.status(429).json({ error: `Too many wrong tries. Try again in ${Math.ceil(wait / 60000)} minute${Math.ceil(wait / 60000) === 1 ? "" : "s"}.` });
+  if (!revPassOk(lock, (req.body || {}).passcode)) { revFails.push(Date.now()); const w = revWaitMs(); return res.status(w > 0 ? 429 : 401).json({ error: w > 0 ? `Too many wrong tries. Try again in ${Math.ceil(w / 60000)} minute${Math.ceil(w / 60000) === 1 ? "" : "s"}.` : "That's not the passcode." }); }
+  revFails = []; revGive(req, res); res.json({ ok: true });
+});
+app.post("/api/revenue/lock", requireOwner, (req, res) => { res.clearCookie("rev"); res.json({ ok: true }); });
+app.post("/api/revenue/change", requireOwner, (req, res) => {
+  const db = loadDB(), lock = db.revenueLock, b = req.body || {}, pass = String(b.passcode || "");
+  if (!lock) return res.status(409).json({ error: "No passcode is set yet." });
+  const wait = revWaitMs(); if (wait > 0) return res.status(429).json({ error: `Too many wrong tries. Try again in ${Math.ceil(wait / 60000)} minute${Math.ceil(wait / 60000) === 1 ? "" : "s"}.` });
+  if (!revPassOk(lock, b.current)) { revFails.push(Date.now()); return res.status(401).json({ error: "The current passcode isn't right." }); }
+  if (pass.length < 6 || pass.length > 64) return res.status(400).json({ error: "Use 6 to 64 characters." });
+  revFails = []; const salt = crypto.randomBytes(16).toString("hex"); db.revenueLock = { salt, hash: revHash(pass, salt), setAt: new Date().toISOString() }; saveDB(db); revGive(req, res); res.json({ ok: true });
+});
+app.get("/api/revenue/report", requireOwner, async (req, res) => {
+  res.set("Cache-Control", "no-store"); const db = loadDB();
+  if (!db.revenueLock) return res.status(409).json({ error: "Choose a passcode first." });
+  const un = revUnlocked(req); if (!un) return res.status(403).json({ error: "Locked. Enter the passcode." });
+  const day = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || "")) && !isNaN(Date.parse(v)) ? String(v) : null), period = ["day", "week", "month", "year", "custom"].includes(req.query.period) ? req.query.period : "month";
+  const q = new URLSearchParams({ period, date: day(req.query.date) || easternDay(new Date()) });
+  if (period === "custom") { const s0 = day(req.query.startDate) || easternDay(new Date()), e0 = day(req.query.endDate) || s0; q.set("startDate", s0); q.set("endDate", e0); }
+  const out = await Promise.all(db.locations.map(async (loc) => {
+    const r = await askShop(loc, "/api/cross-location/revenue?" + q.toString());
+    if (r.needsUpdate || r.error || !r.ok || !r.data) return { name: loc.name, ok: false, error: shopProblem(loc, r) };
+    const d = r.data; return { name: loc.name, ok: true, revenue: Number(d.revenue) || 0, upsellRevenue: Number(d.upsellRevenue) || 0, walkInRevenue: Number(d.walkInRevenue) || 0, paidJobs: d.paidJobs || 0, carsServiced: d.carsServiced || 0, range: d.range };
+  }));
+  const ok = out.filter((x) => x.ok), r2 = (n) => Math.round(n * 100) / 100, sum = (k) => r2(ok.reduce((a, x) => a + x[k], 0));
+  revGive(req, res, un.iat);        // using the screen keeps it unlocked (up to 2 hours in all)
+  res.json({ period, range: (ok.find((x) => x.range) || {}).range || null, total: { revenue: sum("revenue"), upsellRevenue: sum("upsellRevenue"), walkInRevenue: sum("walkInRevenue"), paidJobs: ok.reduce((a, x) => a + x.paidJobs, 0), carsServiced: ok.reduce((a, x) => a + x.carsServiced, 0) }, locations: out.map(({ range, ...x }) => x), partial: ok.length < out.length });
+});
+
 app.listen(PORT, () => console.log(`Combined rep tracker running on port ${PORT}`));
