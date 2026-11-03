@@ -1212,4 +1212,45 @@ app.get("/api/revenue/report", requireOwner, async (req, res) => {
   res.json({ period, range: (ok.find((x) => x.range) || {}).range || null, total: { revenue: sum("revenue"), upsellRevenue: sum("upsellRevenue"), walkInRevenue: sum("walkInRevenue"), paidJobs: ok.reduce((a, x) => a + x.paidJobs, 0), carsServiced: ok.reduce((a, x) => a + x.carsServiced, 0) }, locations: out.map(({ range, ...x }) => x), partial: ok.length < out.length });
 });
 
+// ---------- Add a sales rep ONCE, to every shop ----------
+// Behind the same passcode as Revenue: the owner and the reps share the one login, and a rep's commission rates are pay, so the login alone must not be enough to add one.
+function repsUnlocked(req, res) {
+  if (!loadDB().revenueLock) { res.status(409).json({ error: "Choose a passcode first (it also protects Revenue)." }); return null; }
+  const un = revUnlocked(req); if (!un) { res.status(403).json({ error: "Locked. Enter the passcode." }); return null; }
+  return un;
+}
+const addRepNameKey = (n) => String(n || "").trim().replace(/\s+/g, " ").toLowerCase();
+app.get("/api/reps/overview", requireOwner, async (req, res) => {
+  res.set("Cache-Control", "no-store"); const un = repsUnlocked(req, res); if (!un) return; const db = loadDB();
+  const got = await Promise.all(db.locations.map(async (loc) => { const r = await askShop(loc, `/api/cross-location/salesreps?secret=${encodeURIComponent(loc.secret)}&detail=1`); return { loc, r }; }));
+  const reps = new Map(), problems = [];
+  got.forEach(({ loc, r }) => {
+    if (r.needsUpdate || r.error || !r.ok || !r.data) { problems.push({ location: loc.name, error: shopProblem(loc, r) }); return; }
+    (r.data.salesReps || []).forEach((x) => { const k = addRepNameKey(x.name); if (!reps.has(k)) reps.set(k, { name: x.name, initials: "", commissionRate: null, afterHoursCommissionRate: null, at: {} }); const e = reps.get(k); e.at[loc.id] = true; if (x.initials && !e.initials) e.initials = x.initials; if (e.commissionRate === null && x.commissionRate !== undefined) { e.commissionRate = x.commissionRate; e.afterHoursCommissionRate = x.afterHoursCommissionRate; } });
+  });
+  const failed = new Set(got.filter(({ r }) => r.needsUpdate || r.error || !r.ok || !r.data).map(({ loc }) => loc.id));
+  revGive(req, res, un.iat);
+  res.json({ locations: db.locations.map((l) => ({ id: l.id, name: l.name })), problems,
+    reps: [...reps.values()].sort((a, b) => a.name.localeCompare(b.name)).map((e) => ({ name: e.name, initials: e.initials, commissionRate: e.commissionRate, afterHoursCommissionRate: e.afterHoursCommissionRate, shops: db.locations.map((l) => ({ id: l.id, name: l.name, present: failed.has(l.id) ? null : !!e.at[l.id] })) })) });
+});
+app.post("/api/reps/add", requireOwner, async (req, res) => {
+  res.set("Cache-Control", "no-store"); const un = repsUnlocked(req, res); if (!un) return; const db = loadDB(), b = req.body || {};
+  const name = String(b.name || "").trim().replace(/\s+/g, " "), initials = String(b.initials || "").trim().toUpperCase(), pin = String(b.pin || "");
+  if (name.length < 2 || name.length > 60) return res.status(400).json({ error: "Enter the rep's name." });
+  if (!/^[A-Z0-9]{1,5}$/.test(initials)) return res.status(400).json({ error: "Initials are 1 to 5 letters or numbers." });
+  if (!/^\d{4,12}$/.test(pin)) return res.status(400).json({ error: "The PIN has to be 4 to 12 digits." });
+  const rate = (v) => { const n = v === undefined || v === null || v === "" ? 0 : Number(v); return Number.isFinite(n) && n >= 0 && n <= 100 ? n : NaN; };
+  const c1 = rate(b.commissionRate), c2 = rate(b.afterHoursCommissionRate); if (Number.isNaN(c1) || Number.isNaN(c2)) return res.status(400).json({ error: "Commission rates are percents from 0 to 100." });
+  const want = Array.isArray(b.locationIds) ? b.locationIds.map(String) : db.locations.map((l) => l.id), targets = db.locations.filter((l) => want.includes(l.id));
+  if (!targets.length) return res.status(400).json({ error: "Pick at least one shop." });
+  const body = { name, initials, pin, commissionRate: c1, afterHoursCommissionRate: c2, ...(b.phone ? { phone: String(b.phone) } : {}) };
+  const results = await Promise.all(targets.map(async (loc) => {
+    const r = await askShop(loc, `/api/cross-location/salesreps?secret=${encodeURIComponent(loc.secret)}`, "POST", body);
+    if (r.ok && r.data && r.data.ok) return { id: loc.id, location: loc.name, ok: true, created: !!r.data.created, already: !!r.data.already, ...(r.data.warning ? { warning: r.data.warning } : {}) };
+    return { id: loc.id, location: loc.name, ok: false, error: (r.data && r.data.error && !r.needsUpdate) ? r.data.error : shopProblem(loc, r) };
+  }));
+  revGive(req, res, un.iat);
+  res.json({ results, added: results.filter((x) => x.created).length, already: results.filter((x) => x.already).length, failed: results.filter((x) => !x.ok).length });
+});
+
 app.listen(PORT, () => console.log(`Combined rep tracker running on port ${PORT}`));

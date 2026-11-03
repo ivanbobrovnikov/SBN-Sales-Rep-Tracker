@@ -389,7 +389,7 @@ function renderRevenueCard(content) {
   const box = el("div", { class: "card", "data-part": "revenue-card" }), body = el("div", { "data-part": "revenue-body", style: "display:none;margin-top:12px" });
   let open = false;
   const lockNow = () => api("/api/revenue/lock", { method: "POST" }).catch(() => {});
-  const toggle = el("button", { class: "ghost", "data-act": "revenue-toggle", style: "width:100%;text-align:left;font-size:13px;color:var(--sub)", text: "\u{1F512} Revenue (passcode)", onclick: async () => { open = !open; body.style.display = open ? "block" : "none"; if (open) await show(); else { body.innerHTML = ""; lockNow(); } } });
+  const toggle = el("button", { class: "ghost", "data-act": "revenue-toggle", style: "width:100%;text-align:left;font-size:13px;color:var(--sub)", text: "\u{1F512} Revenue (passcode)", onclick: async () => { open = !open; body.style.display = open ? "block" : "none"; if (open) { await show(); box.scrollIntoView({ block: "start" }); } else { body.innerHTML = ""; lockNow(); } } });   // opened near the bottom of a long page, it scrolls itself into view instead of hiding behind the navigation bar
   box.appendChild(toggle); box.appendChild(body); content.appendChild(box);
   const note = (t, c) => el("div", { "data-part": "revenue-msg", style: "font-size:13px;min-height:16px;margin-top:6px;color:" + (c || "var(--sub)"), text: t || "" });
   const field = (ph, key) => el("input", { type: "password", placeholder: ph, "data-field": key, autocomplete: "off", style: "width:100%;margin-bottom:8px" });
@@ -434,6 +434,77 @@ function renderRevenueCard(content) {
     body.appendChild(per); body.appendChild(date); body.appendChild(d1); body.appendChild(d2); body.appendChild(out);
     body.appendChild(el("div", { class: "row", style: "gap:8px;margin-top:12px;justify-content:flex-start" }, [el("button", { class: "ghost", "data-act": "revenue-lock", text: "Lock now", onclick: async () => { await lockNow(); await show(); } }), el("button", { class: "ghost", "data-act": "revenue-change-open", text: "Change passcode", onclick: () => { changeBox.style.display = changeBox.style.display === "none" ? "block" : "none"; } })]));
     body.appendChild(changeBox); await load();
+  }
+}
+
+// Add a sales rep ONCE and it is added to every shop. It sits under Revenue, behind the same passcode: everyone shares the one login here, and a rep's commission rates are pay.
+function renderRepsCard(content) {
+  const box = el("div", { class: "card", "data-part": "reps-card" }), body = el("div", { "data-part": "reps-body", style: "display:none;margin-top:12px" });
+  let open = false;
+  const lockNow = () => api("/api/revenue/lock", { method: "POST" }).catch(() => {});
+  const toggle = el("button", { class: "ghost", "data-act": "reps-toggle", style: "width:100%;text-align:left;font-size:13px;color:var(--sub)", text: "\u{1F512} Add a sales rep to every shop (passcode)", onclick: async () => { open = !open; body.style.display = open ? "block" : "none"; if (open) { await show(); box.scrollIntoView({ block: "start" }); } else { body.innerHTML = ""; lockNow(); } } });   // opened near the bottom of a long page, it scrolls itself into view instead of hiding behind the navigation bar
+  box.appendChild(toggle); box.appendChild(body); content.appendChild(box);
+  const note = (t, c) => el("div", { "data-part": "reps-msg", style: "font-size:13px;min-height:16px;margin-top:6px;color:" + (c || "var(--sub)"), text: t || "" });
+  async function show() {
+    body.innerHTML = ""; let st; try { st = await api("/api/revenue/status"); } catch (e) { body.appendChild(note(e.message, "var(--red)")); return; }
+    if (!st.set) { body.appendChild(el("div", { class: "muted", style: "font-size:13px", text: "Choose the passcode first: open \u201CRevenue (passcode)\u201D above and set it. The same passcode protects this." })); return; }
+    if (!st.unlocked) return lockedForm(st); return panel();
+  }
+  function lockedForm(st) {
+    const p = el("input", { type: "password", placeholder: "Passcode", "data-field": "reps-pass", autocomplete: "off", style: "width:100%;margin-bottom:8px" }), m = note(st.waitMinutes > 0 ? `Too many wrong tries. Try again in ${st.waitMinutes} minute${st.waitMinutes === 1 ? "" : "s"}.` : "", "var(--red)");
+    const go = async () => { m.textContent = ""; try { await api("/api/revenue/unlock", { method: "POST", body: JSON.stringify({ passcode: p.value }) }); await show(); } catch (e) { p.value = ""; m.textContent = e.message; m.style.color = "var(--red)"; } };
+    p.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+    body.appendChild(el("div", { class: "muted", style: "font-size:13px;margin-bottom:8px", text: "Add one rep here and they are added to all your shops at once, instead of going into each one." }));
+    body.appendChild(p); body.appendChild(el("button", { class: "primary", "data-act": "reps-unlock", text: "Unlock", onclick: go })); body.appendChild(m);
+  }
+  async function panel() {
+    body.innerHTML = ""; let ov;
+    try { ov = await api("/api/reps/overview"); } catch (e) { if (/Locked|passcode/i.test(e.message)) return show(); body.appendChild(note(e.message, "var(--red)")); return; }
+    const inp = (key, ph, type, extra) => el("input", { type: type || "text", placeholder: ph, "data-field": key, autocomplete: "off", style: "width:100%;margin-bottom:8px", ...(extra || {}) });
+    const name = inp("reps-name", "Name"), ini = inp("reps-initials", "Initials used in titles (like JA)", "text", { maxlength: "5" }), pin = inp("reps-pin", "PIN the rep logs in with (4 to 12 digits)", "password", { inputmode: "numeric" });
+    const r1 = inp("reps-rate", "Commission % during hours", "number", { step: "0.1", min: "0", max: "100" }), r2 = inp("reps-rate-after", "Commission % after hours", "number", { step: "0.1", min: "0", max: "100" }), phone = inp("reps-phone", "Phone (optional)", "tel");
+    const out = el("div", { "data-part": "reps-result", style: "margin-top:8px" }), list = el("div", { "data-part": "reps-list", style: "margin-top:14px" });
+    const checks = ov.locations.map((l) => { const cb = el("input", { type: "checkbox", "data-loc": l.id, style: "margin:0;width:18px;height:18px;flex:none" }); cb.checked = true; cb.addEventListener("change", paint); return { l, cb }; });
+    const go = el("button", { class: "primary", "data-act": "reps-add", onclick: submit });
+    function paint() { const n = checks.filter((c) => c.cb.checked).length; go.textContent = n ? `Add to ${n} shop${n === 1 ? "" : "s"}` : "Pick a shop"; go.disabled = !n; }
+    async function submit() {
+      out.innerHTML = ""; go.disabled = true;
+      try {
+        const r = await api("/api/reps/add", { method: "POST", body: JSON.stringify({ name: name.value, initials: ini.value, pin: pin.value, commissionRate: r1.value, afterHoursCommissionRate: r2.value, phone: phone.value, locationIds: checks.filter((c) => c.cb.checked).map((c) => c.l.id) }) });
+        pin.value = "";
+        out.appendChild(el("div", { "data-part": "reps-summary", style: "font-weight:600;margin-bottom:6px", text: [r.added ? `Added to ${r.added} shop${r.added === 1 ? "" : "s"}` : "", r.already ? `${r.already} already had them` : "", r.failed ? `${r.failed} need${r.failed === 1 ? "s" : ""} attention` : ""].filter(Boolean).join(" \u00B7 ") }));
+        r.results.forEach((x) => out.appendChild(el("div", { "data-part": "reps-result-row", style: "font-size:13px;margin:3px 0;color:" + (x.ok ? "var(--green)" : "var(--red)"), text: x.ok ? `\u2713 ${x.location}: ${x.created ? "added" : "already there, left as it was"}${x.warning ? " (" + x.warning + ")" : ""}` : `\u2717 ${x.location}: ${x.error}` })));
+        if (r.failed) out.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-top:6px", text: "Fix what's listed, then press Add again. Shops that already have the rep are left alone, and keep the PIN they have." }));
+        await refresh();
+      } catch (e) { if (/Locked|passcode/i.test(e.message)) return show(); out.appendChild(note(e.message, "var(--red)")); }
+      paint();
+    }
+    function prefill(rep, missing) {
+      name.value = rep.name; ini.value = rep.initials || ""; r1.value = rep.commissionRate === null ? "" : rep.commissionRate; r2.value = rep.afterHoursCommissionRate === null ? "" : rep.afterHoursCommissionRate; pin.value = ""; out.innerHTML = "";
+      const miss = new Set(missing.map((s) => s.id)); checks.forEach((c) => { c.cb.checked = miss.has(c.l.id); }); paint();
+      out.appendChild(note(`Type ${rep.name}'s PIN for ${missing.map((s) => s.name).join(" and ")} (a PIN can't be copied between shops), then press Add.`)); pin.scrollIntoView({ block: "center" }); pin.focus();
+    }
+    async function refresh() {
+      let o; try { o = await api("/api/reps/overview"); } catch (e) { return; }
+      list.innerHTML = ""; list.appendChild(el("div", { class: "muted", style: "font-size:12px;letter-spacing:0.04em;margin-bottom:4px", text: "YOUR SALES REPS, SHOP BY SHOP" }));
+      o.problems.forEach((p) => list.appendChild(el("div", { "data-part": "reps-problem", style: "font-size:12.5px;color:var(--warn);margin-bottom:4px", text: `${p.location}: ${p.error}` })));
+      if (!o.reps.length) list.appendChild(el("div", { class: "muted", style: "font-size:12.5px", text: "No sales reps in any shop yet." }));
+      o.reps.forEach((rep) => { const missing = rep.shops.filter((s) => s.present === false);
+        list.appendChild(el("div", { "data-part": "reps-rep", style: "padding:8px 0;border-top:1px solid var(--line)" }, [
+          el("div", { style: "display:flex;gap:8px;align-items:baseline" }, [el("b", { text: rep.name }), el("span", { class: "muted", style: "font-size:12px", text: [rep.initials ? `(${rep.initials})` : "", rep.commissionRate !== null ? `${rep.commissionRate}% / ${rep.afterHoursCommissionRate}% after hours` : ""].filter(Boolean).join(" \u00B7 ") })]),
+          el("div", { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:5px" }, rep.shops.map((s) => el("span", { "data-part": "reps-chip", style: `font-size:12px;padding:2px 9px;border-radius:10px;border:1px solid var(--line);color:${s.present === true ? "var(--green)" : s.present === false ? "var(--warn)" : "var(--sub)"}`, text: `${s.present === true ? "\u2713" : s.present === false ? "\u2717" : "?"} ${s.name}` }))),
+          missing.length ? el("button", { class: "ghost", "data-act": "reps-fill", style: "margin-top:6px;font-size:12px", text: `Add to ${missing.map((s) => s.name).join(", ")}`, onclick: () => prefill(rep, missing) }) : null,
+        ]));
+      });
+    }
+    body.appendChild(el("div", { class: "muted", style: "font-size:13px;margin-bottom:10px", text: "Add a rep once and they are created in every shop you tick. A shop that already has them is left exactly as it is." }));
+    const lab = (t) => el("div", { class: "muted", style: "font-size:11.5px;margin:2px 0 3px", text: t });
+    [["Name", name], ["Initials used in titles (like JA)", ini], ["PIN the rep logs in with (4 to 12 digits)", pin], ["Commission % during hours", r1], ["Commission % after hours", r2], ["Phone (optional)", phone]].forEach(([t, i]) => { body.appendChild(lab(t)); body.appendChild(i); });
+    body.appendChild(el("div", { class: "muted", style: "font-size:12px;margin:2px 0 6px", text: "Add them to:" }));
+    checks.forEach((c) => body.appendChild(el("div", { style: "display:flex;align-items:center;justify-content:flex-start;gap:10px;font-size:14px;margin:8px 0" }, [c.cb, el("span", { style: "cursor:pointer", text: c.l.name, onclick: () => { c.cb.checked = !c.cb.checked; paint(); } })])));
+    body.appendChild(el("div", { style: "margin-top:10px" }, [go])); body.appendChild(out); body.appendChild(list);
+    body.appendChild(el("button", { class: "ghost", "data-act": "reps-lock", style: "margin-top:12px", text: "Lock now", onclick: async () => { await lockNow(); await show(); } }));
+    paint(); await refresh();
   }
 }
 
@@ -872,7 +943,8 @@ async function renderSettings(content) {
     pwNotice,
   ]));
   api("/api/password-status").then((s) => { if (s.resetVariableSet) pwWarn.style.display = "block"; }).catch(() => {});
-  renderRevenueCard(content);                     // the last thing on the page, closed and locked
+  renderRevenueCard(content);                     // closed and locked
+  renderRepsCard(content);                        // the last thing on the page, closed and locked, behind the same passcode
 }
 
 async function renderCleanup(content) {
