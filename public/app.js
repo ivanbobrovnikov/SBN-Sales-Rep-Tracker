@@ -1619,6 +1619,14 @@ async function renderAudit(content) {
 
   // Marks (or un-marks) a booking as a reschedule at its own location. The shop says which fields it applied, so a
   // location that hasn't been updated yet (it would silently ignore this) gets a clear message instead.
+  async function setSameDayExempt(c, flag) {
+    if (flag && !confirm("Count this as a close anyway?\n\nIt is a same-day booking that didn't show on time, so it is normally not counted. Use this only if you know it should count (for example the customer did come in and nobody marked it).")) return;
+    try {
+      const res = await api("/api/combined/job-edit", { method: "POST", body: JSON.stringify({ locationId: c.locationId, saleId: c.id, sameDayExempt: flag }) });
+      if (!res.applied || !res.applied.includes("sameDayExempt")) { say(`${c.locationName} needs the latest tracker update before this can be used there.`, false); return; }
+      await load(); say(flag ? "Counted as a close." : "Left out again.");
+    } catch (e) { say(e.message || "Couldn't change that.", false); }
+  }
   async function setReschedule(c, flag) {
     if (!confirm(flag ? "Mark this as a reschedule?\n\nIt will be left out of the closing numbers (this tab, the leaderboard, Combined and Statistics), because it's the same deal moved to a new day, not a new sale.\n\nIt stays fully in Payroll: the rep is still paid commission when the client shows up. You can undo this any time." : "Count this as a close again?")) return;
     try {
@@ -1634,18 +1642,19 @@ async function renderAudit(content) {
     const left = (data.leftOut || []).filter((x) => activeLocation === "combined" || x.locationName === activeLocation);
     if (left.length === 0) return null;
     const n = left.length;
-    const label = (open) => `${open ? "▾" : "▸"} ↻ ${n} rescheduled booking${n !== 1 ? "s" : ""} left out of closing activity (still paid when the client shows)`;
-    const list = el("div", { style: "display:none;margin-top:8px" }, left.map((c) => el("div", { style: "padding:8px 0;border-top:0.5px solid var(--border)" }, [
+    const nSD = left.filter((c) => c.kind === "same-day").length, nRe = n - nSD;
+    const label = (open) => `${open ? "▾" : "▸"} ↻ ${n} booking${n !== 1 ? "s" : ""} left out of closing activity: ${[nRe ? `${nRe} rescheduled (still paid when the client shows)` : "", nSD ? `${nSD} same-day that didn't show (counts again if the customer does)` : ""].filter(Boolean).join(", ")}`;
+    const list = el("div", { "data-part": "left-out-list", style: "display:none;margin-top:8px" }, left.map((c) => el("div", { "data-kind": c.kind || "reschedule", style: "padding:8px 0;border-top:0.5px solid var(--border)" }, [
       el("div", { class: "row", style: "align-items:flex-start" }, [
         el("div", {}, [
           el("div", { style: "font-size:13px;font-weight:500", text: c.car }),
           el("div", { class: "muted", style: "font-size:11px", text: [c.repName, c.customerName, c.locationName].filter(Boolean).join(" · ") }),
           el("div", { class: "muted", style: "font-size:10.5px", text: `Closed ${formatDateTime(c.closedAt)} · car scheduled ${formatDateTime(c.date)}` }),
-          c.auto ? el("div", { style: "font-size:10.5px;color:var(--amber)", text: "Flagged automatically: the title says rescheduled" }) : null,
+          c.kind === "same-day" ? el("div", { style: "font-size:10.5px;color:var(--amber)", text: "Same-day booking that didn't show. Still a no-show for the VA to call, and still paid if they show. It counts again when the customer shows." }) : c.auto ? el("div", { style: "font-size:10.5px;color:var(--amber)", text: c.autoReason === "same-day-rebook" ? "Flagged automatically: a same-day re-booking of a no-show" : "Flagged automatically: the title says rescheduled" }) : null,
         ]),
         el("div", { class: "mono", style: "font-size:13px", text: money(c.basePrice) }),
       ]),
-      el("button", { class: "ghost", style: "font-size:11px;padding:3px 9px;margin-top:6px", text: "Count as a close", onclick: () => setReschedule(c, false) }),
+      c.kind === "same-day" ? el("button", { class: "ghost", "data-act": "count-anyway", style: "font-size:11px;padding:3px 9px;margin-top:6px", text: "Count it anyway", onclick: () => setSameDayExempt(c, true) }) : el("button", { class: "ghost", style: "font-size:11px;padding:3px 9px;margin-top:6px", text: "Count as a close", onclick: () => setReschedule(c, false) }),
     ])));
     const toggle = el("button", { class: "ghost", style: "width:100%;text-align:left;font-size:12px;color:var(--amber)", text: label(false), onclick: () => {
       const open = list.style.display !== "none";
