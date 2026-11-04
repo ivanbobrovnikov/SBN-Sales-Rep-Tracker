@@ -947,7 +947,43 @@ async function renderSettings(content) {
   renderRepsCard(content);                        // the last thing on the page, closed and locked, behind the same passcode
 }
 
+// Is every shop lined up with GHL? One card for all of them. Each shop compares its own jobs with GHL (read-only); a shop that isn't connected to GHL's API can't be checked, and says so.
+function renderGhlAlignment(content) {
+  const box = el("div", { class: "card", "data-part": "align-card" }), out = el("div", { "data-part": "align-out", style: "margin-top:10px" });
+  const KIND = { rescheduled: "no-show or cancelled here, rescheduled in GHL", "cancelled-here-live-there": "cancelled here by a person, live in GHL", "cancelled-in-ghl": "cancelled in GHL, still live here", time: "different time in GHL", "noshow-in-ghl": "no-show in GHL, still pending here" };
+  const when = (iso) => (iso ? new Date(iso).toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "none");
+  const go = el("button", { class: "primary", "data-act": "align-check", text: "Check every shop against GHL", onclick: run });
+  box.appendChild(el("div", { style: "font-weight:600;margin-bottom:4px", text: "Is every shop lined up with GHL?" }));
+  box.appendChild(el("div", { class: "muted", style: "font-size:13px;margin-bottom:10px", text: "Each shop compares its jobs with GHL's own record of the appointments and lists where they disagree: a no-show GHL moved to a new day, a cancel that never arrived, a different time. Looking changes nothing." }));
+  box.appendChild(go); box.appendChild(out); content.appendChild(box);
+  async function run() {
+    go.disabled = true; go.textContent = "Checking every shop (up to a minute)..."; out.innerHTML = "";
+    let r; try { r = await api("/api/ghl-alignment"); } catch (e) { out.appendChild(el("div", { style: "color:var(--red);font-size:13px", text: e.message })); go.disabled = false; go.textContent = "Check every shop against GHL"; return; }
+    go.disabled = false; go.textContent = "Check every shop again";
+    const n = (s) => r.shops.filter((x) => x.state === s).length;
+    out.appendChild(el("div", { "data-part": "align-summary", style: "font-weight:600;margin-bottom:8px", text: `${r.shops.length} shop${r.shops.length === 1 ? "" : "s"}: ${n("matches")} match${n("matches") === 1 ? "es" : ""} GHL${n("differs") ? `, ${n("differs")} ${n("differs") === 1 ? "has" : "have"} differences` : ""}${n("not-connected") ? `, ${n("not-connected")} can't be checked (not connected to GHL)` : ""}${n("unreachable") ? `, ${n("unreachable")} couldn't be reached` : ""}` }));
+    r.shops.forEach((s) => {
+      const color = s.state === "matches" ? "var(--green)" : s.state === "differs" ? "var(--warn)" : "var(--red)";
+      const head = s.state === "matches" ? `\u2713 Lined up with GHL (${s.checked} customer${s.checked === 1 ? "" : "s"} compared)` : s.state === "differs" ? `${s.total} difference${s.total === 1 ? "" : "s"} (${s.checked} customer${s.checked === 1 ? "" : "s"} compared)` : s.state === "not-connected" ? "Not connected to GHL's API: this shop cannot be compared or kept lined up" : s.error;
+      const sh = el("div", { "data-part": "align-shop", "data-state": s.state, style: "padding:10px 0;border-top:1px solid var(--line)" }, [
+        el("div", { style: "display:flex;gap:8px;align-items:baseline" }, [el("b", { text: s.name }), el("span", { style: `font-size:13px;color:${color}`, text: head })]),
+      ]);
+      if (s.state === "not-connected") sh.appendChild(el("div", { class: "muted", style: "font-size:12.5px;margin-top:4px", text: "In Railway, open this shop's service and add GHL_API_TOKEN and GHL_LOCATION_ID under Variables. Until then it only knows what GHL's messages tell it, and GHL doesn't send one when a no-show is moved." }));
+      if (s.state === "differs") {
+        sh.appendChild(el("div", { class: "muted", style: "font-size:12.5px;margin-top:4px", text: Object.entries(s.byKind).map(([k, c]) => `${c} ${KIND[k] || k}`).join(" \u00B7 ") }));
+        s.rows.forEach((d) => sh.appendChild(el("div", { "data-part": "align-row", style: "font-size:12.5px;margin-top:6px" }, [el("div", { text: [d.customer, (d.car || "").slice(0, 44)].filter(Boolean).join(" \u00B7 ") }), el("div", { class: "muted", style: "font-size:12px", text: `Here: ${String(d.trackerStatus).replace("_", "-")}, ${when(d.trackerDate)}  \u2192  GHL: ${String(d.ghlStatus || "?").toLowerCase()}, ${when(d.ghlDate)}` })])));
+        if (s.total > s.rows.length) sh.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-top:6px", text: `...and ${s.total - s.rows.length} more. Open ${s.name} \u2192 Cleanup \u2192 Compare with GHL for the whole list.` }));
+        const fix = el("button", { class: "ghost", "data-act": "align-fix", style: "margin-top:8px", text: `Run ${s.name}'s GHL check now`, onclick: async () => { fix.disabled = true; fix.textContent = "Fixing..."; try { await api("/api/ghl-heal", { method: "POST", body: JSON.stringify({ locationId: s.id }) }); } catch (e) { fix.textContent = e.message; return; } run(); } });
+        sh.appendChild(fix); sh.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-top:4px", text: "That moves rescheduled no-shows and fixes times. A cancel or a person's decision is made in that shop's Cleanup tab." }));
+      }
+      if (s.state === "matches" || s.state === "differs") sh.appendChild(el("div", { class: "muted", "data-part": "align-auto", style: "font-size:11.5px;margin-top:4px" + (s.everyMinutes > 0 ? "" : ";color:var(--warn)"), text: s.everyMinutes > 0 ? `It also checks by itself every ${s.everyMinutes} minutes${s.lastAutomatic ? ` (last: ${when(s.lastAutomatic)})` : ""}.` : "The automatic check is switched off on this shop (GHL_CHECK_MINUTES is 0)." }));
+      out.appendChild(sh);
+    });
+  }
+}
+
 async function renderCleanup(content) {
+  renderGhlAlignment(content);
   const body = el("div");
   // Suspected reschedules (a booking whose customer already has an earlier unfinished one for the same car) and the
   // ones already left out. The button works at that booking's own location.

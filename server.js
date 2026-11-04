@@ -1108,13 +1108,13 @@ app.put("/api/me/sound", requireTeam, async (req, res) => {
 });
 
 // ---------- Find an appointment and add an upsell (owner or sales team). Reads and writes go to the shop that owns the appointment. ----------
-async function askShop(loc, pathAndQuery, method, body) {
+async function askShop(loc, pathAndQuery, method, body, timeoutMs) {
   try {
-    const r = await fetch(loc.url + pathAndQuery, { method: method || "GET", headers: { "Content-Type": "application/json", "X-Cross-Secret": loc.secret }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(12000) });
+    const r = await fetch(loc.url + pathAndQuery, { method: method || "GET", headers: { "Content-Type": "application/json", "X-Cross-Secret": loc.secret }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(timeoutMs || 12000) });
     let data = null; try { data = await r.json(); } catch (e) { /* not json */ }
     if (data === null && (r.status === 404 || r.ok)) return { needsUpdate: true };            // an older tracker that doesn't know this route yet
     return { status: r.status, ok: r.ok, data };
-  } catch (e) { return { error: e.name === "TimeoutError" ? "No answer after 12 seconds." : (e.message || "Unreachable") }; }
+  } catch (e) { return { error: e.name === "TimeoutError" ? `No answer after ${Math.round((timeoutMs || 12000) / 1000)} seconds.` : (e.message || "Unreachable") }; }
 }
 const shopProblem = (loc, r) => r.needsUpdate ? `${loc.name} needs the latest tracker update before this works there.` : r.error ? `Couldn't reach ${loc.name} (${r.error}).` : r.status === 401 ? `${loc.name} refused the secret. Check it in Settings.` : null;
 app.get("/api/rep/locations", requireTeam, (req, res) => res.json(loadDB().locations.map((l) => ({ id: l.id, name: l.name }))));
@@ -1251,6 +1251,26 @@ app.post("/api/reps/add", requireOwner, async (req, res) => {
   }));
   revGive(req, res, un.iat);
   res.json({ results, added: results.filter((x) => x.created).length, already: results.filter((x) => x.already).length, failed: results.filter((x) => !x.ok).length });
+});
+
+// ---------- Is every shop lined up with GHL? One screen for all of them (Cleanup tab) ----------
+// Each shop compares its own jobs with GHL (read-only) and says what differs. A shop that isn't connected to GHL's API can't be checked, and says so.
+app.get("/api/ghl-alignment", requireOwner, async (req, res) => {
+  res.set("Cache-Control", "no-store"); const db = loadDB();
+  const shops = await Promise.all(db.locations.map(async (loc) => {
+    const r = await askShop(loc, `/api/cross-location/ghl-alignment?secret=${encodeURIComponent(loc.secret)}`, "GET", null, 90000);
+    if (r.needsUpdate || r.error || !r.ok || !r.data) return { id: loc.id, name: loc.name, state: "unreachable", error: shopProblem(loc, r) || "That shop didn't answer properly." };
+    const d = r.data; if (!d.configured) return { id: loc.id, name: loc.name, state: "not-connected" };
+    const byKind = {}; (d.differences || []).forEach((x) => { byKind[x.kind] = (byKind[x.kind] || 0) + 1; });
+    return { id: loc.id, name: loc.name, state: (d.differences || []).length ? "differs" : "matches", checked: d.checked, unreadable: d.unreadable, everyMinutes: d.everyMinutes, lastAutomatic: d.lastAutomatic || null, total: (d.differences || []).length, byKind, rows: (d.differences || []).slice(0, 12).map((x) => ({ kind: x.kind, customer: x.customer, car: x.car, trackerStatus: x.trackerStatus, trackerDate: x.trackerDate, ghlStatus: x.ghlStatus, ghlDate: x.ghlDate })) };
+  }));
+  res.json({ shops, checkedAt: new Date().toISOString() });
+});
+app.post("/api/ghl-heal", requireOwner, async (req, res) => {
+  const loc = loadDB().locations.find((l) => l.id === (req.body || {}).locationId); if (!loc) return res.status(404).json({ error: "Shop not found." });
+  const r = await askShop(loc, `/api/cross-location/ghl-heal?secret=${encodeURIComponent(loc.secret)}`, "POST", {}, 180000);
+  if (r.needsUpdate || r.error || !r.ok || !r.data) return res.status(502).json({ error: shopProblem(loc, r) || "That shop didn't answer properly." });
+  res.json(r.data);
 });
 
 app.listen(PORT, () => console.log(`Combined rep tracker running on port ${PORT}`));
