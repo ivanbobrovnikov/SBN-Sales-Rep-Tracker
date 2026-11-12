@@ -21,6 +21,11 @@ sub init()
     m.confettiTimer = m.top.findNode("confettiTimer")
     m.confetti = m.top.findNode("confetti")
     m.confettiAnim = m.top.findNode("confettiAnim")
+    m.gold = m.top.findNode("gold")                  ' the Gold Rush celebrations (see the section further down)
+    m.goldAnim = m.top.findNode("goldAnim")
+    m.gConfetti = m.top.findNode("gConfetti")
+    m.gConfettiAnim = m.top.findNode("gConfettiAnim")
+    m.celebrate = { enabled: false, seconds: [9, 12, 15, 20] }       ' the tracker switches this on in the feed; until it does, the original banner is used
     m.audio = invalid            ' the audio player is made fresh for every attempt (see stopPlayer / nextAttempt) and never reused
     m.audioMade = 0
     m.soundSeq = 0
@@ -109,6 +114,7 @@ sub init()
     print "TV> start server=" + m.cfg.server
     if m.cfg.pollSeconds <> invalid then m.pollTimer.duration = m.cfg.pollSeconds       ' optional: tests refresh faster than the normal 15 seconds
     if m.cfg.bannerSeconds <> invalid then m.bannerTimer.duration = m.cfg.bannerSeconds ' optional: tests don't wait the normal 9 seconds
+    m.bannerSecs = m.bannerTimer.duration           ' the original banner's time, put back whenever it is used again after a longer celebration
     m.pollTimer.control = "start"
     m.clockTimer.control = "start"
     di = CreateObject("roDeviceInfo")
@@ -207,7 +213,15 @@ sub applyFeed(feed as object)
             m.testSeq = feed.test.seq
         else if feed.test.seq <> m.testSeq
             m.testSeq = feed.test.seq
-            m.queue.Push({ isTest: true, sound: feed.test.sound })
+            t = { isTest: true, sound: feed.test.sound }
+            if feed.test.tier <> invalid           ' a test of one deal size (from the tracker's Settings): it carries the sample deal to show
+                t.tier = feed.test.tier
+                t.priceCents = feed.test.priceCents
+                t.repName = feed.test.repName
+                t.service = feed.test.service
+                t.location = feed.test.location
+            end if
+            m.queue.Push(t)
             print "TV> test sound requested"
         end if
     end if
@@ -221,6 +235,7 @@ sub applyFeed(feed as object)
         print "TV> status " + m.statusLabel.text
     end if
     if feed.confetti <> invalid then m.confettiOn = feed.confetti
+    if feed.celebrate <> invalid then m.celebrate = feed.celebrate
     if feed.totals <> invalid then showTotals(feed.totals)
     rows = feed.rows
     if rows = invalid then rows = []
@@ -535,6 +550,266 @@ end sub
 sub hideConfetti()
     m.confetti.visible = false
     m.confettiAnim.control = "stop"
+    if m.gConfetti <> invalid then m.gConfetti.visible = false
+    if m.gConfettiAnim <> invalid then m.gConfettiAnim.control = "stop"
+end sub
+
+' ================================================================================================================================
+' GOLD RUSH CELEBRATIONS: the bigger the deal, the bigger the celebration.
+'   size 0  a navy bar along the bottom          size 1  a bigger gold bar, with a BIG DEAL tag
+'   size 2  full screen, gold rays, HUGE DEAL    size 3  full screen, hazard stripes, MONSTER DEAL, the biggest type
+' The tracker works out each deal's size and its sound; this only draws it. If the tracker doesn't send a size, has celebrations switched off,
+' or a piece is missing, the original banner is used instead, so the TV can never be left without a banner.
+' ================================================================================================================================
+function goldWanted(c as object) as boolean
+    if c.tier = invalid then return false
+    if m.top.findNode("gold") = invalid then return false
+    if c.isTest = true then return true                   ' a test from Settings is always shown, even with celebrations switched off, so a size can be seen
+    en = m.celebrate.enabled
+    if en = invalid then return false
+    if en = false then return false
+    return true
+end function
+
+sub goldPut(id as string, x as integer, y as integer, w as integer, h as integer)
+    n = m.top.findNode(id)
+    if n = invalid then return
+    n.translation = [x, y]
+    n.width = w
+    n.height = h
+    n.visible = true
+end sub
+
+sub goldRect(id as string, x as integer, y as integer, w as integer, h as integer, color as string)
+    n = m.top.findNode(id)
+    if n = invalid then return
+    n.color = color
+    goldPut(id, x, y, w, h)
+end sub
+
+sub goldText(id as string, txt as string, x as integer, y as integer, w as integer, h as integer, weight as string, size as integer, color as string, align as string, valign as string)
+    n = m.top.findNode(id)
+    if n = invalid then return
+    setFont(n, weight, size)
+    n.text = txt
+    n.color = color
+    n.horizAlign = align
+    n.vertAlign = valign
+    goldPut(id, x, y, w, h)
+end sub
+
+' Places text by the middle of its capital letters (cy): the label is centred on that line, nudged by the font's own offset, so big numbers land where the design puts them whatever the line height.
+sub goldTextC(id as string, txt as string, x as integer, cy as integer, w as integer, weight as string, size as integer, color as string, align as string)
+    h = (size * 3) \ 2
+    y = cy - (h \ 2) - ((size * 47) \ 1000)
+    goldText(id, txt, x, y, w, h, weight, size, color, align, "center")
+end sub
+
+sub goldCircle(id as string, cx as integer, cy as integer, dia as integer, color as string)
+    n = m.top.findNode(id)
+    if n = invalid then return
+    n.blendColor = color
+    goldPut(id, cx - (dia \ 2), cy - (dia \ 2), dia, dia)
+end sub
+
+' a rep's avatar centred on (cx, cy): their photo in a ring when we have it, otherwise a coloured circle with their initials; a size-2 deal gets two extra rings around it
+sub goldAvatar(cx as integer, cy as integer, dia as integer, ring as string, fill as string, gap as string, extra as boolean, initials as string, photo as string)
+    bw = dia \ 18
+    if bw < 9 then bw = 9
+    if extra
+        goldCircle("gAvR1", cx, cy, dia + 60, ring)
+        goldCircle("gAvR2", cx, cy, dia + 42, gap)
+    end if
+    goldCircle("gAvR3", cx, cy, dia, ring)
+    goldCircle("gAvIn", cx, cy, dia - (bw * 2), fill)
+    if photo <> ""
+        n = m.top.findNode("gAvPhoto")
+        if n <> invalid
+            n.uri = photo
+            goldPut("gAvPhoto", cx - ((dia - (bw * 2)) \ 2), cy - ((dia - (bw * 2)) \ 2), dia - (bw * 2), dia - (bw * 2))
+        end if
+    else
+        goldText("gAvInit", initials, cx - (dia \ 2), cy - (dia \ 2), dia, dia, "bold", (dia * 38) \ 100, "0xFFFFFFFF", "center", "center")
+    end if
+end sub
+
+function goldInitials(name as string) as string
+    first = ""
+    last = ""
+    count = 0
+    for each p in name.Split(" ")
+        if Len(p) > 0
+            if first = "" then first = UCase(Left(p, 1))
+            last = UCase(Left(p, 1))
+            count = count + 1
+        end if
+    end for
+    if count = 0 then return "?"
+    if count = 1 then return first
+    return first + last
+end function
+
+' the rep's photo, if the TV has already downloaded it and photos are switched on
+function goldPhoto(name as string) as string
+    dp = m.display.photos
+    if dp <> invalid
+        if dp = false then return ""
+    end if
+    if m.lastRows = invalid then return ""
+    for each r in m.lastRows
+        if r.name = name
+            pid = tv_photoId(r)
+            if pid <> "" and m.havePhoto.DoesExist(pid) then return tv_photoPath(pid)
+            return ""
+        end if
+    end for
+    return ""
+end function
+
+' a long amount ($12,500) is set a little smaller so it always fits the screen
+function goldAmountSize(base as integer, txt as string) as integer
+    n = Len(txt)
+    if n <= 6 then return base
+    s = (base * 6) \ n
+    if s < 100 then s = 100
+    return s
+end function
+
+function goldSeconds(size as integer) as dynamic
+    if m.cfg <> invalid and m.cfg.bannerSeconds <> invalid then return m.cfg.bannerSeconds
+    secs = 9
+    if m.celebrate <> invalid and m.celebrate.seconds <> invalid
+        if m.celebrate.seconds.Count() > size
+            v = m.celebrate.seconds[size]
+            if v <> invalid
+                if v >= 5 and v <= 30 then secs = v
+            end if
+        end if
+    end if
+    return secs
+end function
+
+sub goldHideAll()
+    for each id in ["gBg", "gRays", "gConfetti", "gHazTop", "gHazBot", "gBar", "gBarLine", "gBand", "gBandL1", "gBandL2", "gAvR1", "gAvR2", "gAvR3", "gAvIn", "gAvPhoto", "gAvInit", "gChip", "gChipText", "gTop", "gName", "gAmountSh", "gAmount", "gService", "gShopO", "gShopI", "gShop"]
+        n = m.top.findNode(id)
+        if n <> invalid then n.visible = false
+    end for
+end sub
+
+sub hideGold()
+    if m.gold <> invalid then m.gold.visible = false
+end sub
+
+sub startGoldConfetti()
+    if not m.confettiOn then return
+    if m.gConfetti = invalid or m.gConfettiAnim = invalid then return
+    m.gConfettiAnim.control = "stop"
+    m.gConfetti.translation = [0, -1080]
+    m.gConfetti.visible = true
+    m.gConfettiAnim.control = "start"
+    m.confettiTimer.control = "start"
+end sub
+
+sub showGold(c as object, more as integer)
+    m.bannerBusy = true
+    size = 0
+    ty = type(c.tier)                      ' only a number is a deal size; anything else (or nothing) is treated as a standard deal rather than risking a crash
+    if ty = "Integer" or ty = "roInt" or ty = "Float" or ty = "roFloat" or ty = "Double" or ty = "roDouble" or ty = "LongInteger" or ty = "roLongInteger" then size = Int(c.tier)
+    if size < 0 then size = 0
+    if size > 3 then size = 3
+    name = c.repName
+    if name = invalid then name = ""
+    nameU = UCase(name)
+    amt = tv_money(c.priceCents)
+    svc = c.service
+    if svc = invalid then svc = ""
+    detail = svc
+    shop = c.location
+    if shop = invalid then shop = ""
+    if shop <> ""
+        if detail <> "" then detail = detail + "  -  " + shop else detail = shop
+    end if
+    if more > 0 then detail = detail + "   (+" + more.ToStr() + " more)"
+    initials = goldInitials(name)
+    photo = goldPhoto(name)
+    navy = "0x0B1D3AFF"
+    navy2 = "0x12294DFF"
+    navy3 = "0x1B3A6BFF"
+    gold = "0xE8B93BFF"
+    gold2 = "0xB8891AFF"
+    silver = "0xC9D3E3FF"
+    white = "0xFFFFFFFF"
+    goldHideAll()
+    if size = 0
+        goldRect("gBar", 84, 720, 1752, 276, navy2)
+        goldRect("gBarLine", 84, 720, 1752, 9, gold)
+        goldAvatar(228, 858, 168, gold, navy3, "", false, initials, photo)
+        goldTextC("gTop", nameU + " JUST CLOSED", 360, 769, 800, "semibold", 45, gold, "left")
+        goldTextC("gAmount", amt, 360, 866, 760, "bold", goldAmountSize(138, amt), white, "left")
+        goldTextC("gService", svc, 1196, 796, 580, "semibold", 48, silver, "right")
+        shopText = shop
+        if more > 0 then shopText = shop + "   (+" + more.ToStr() + " more)"
+        goldTextC("gShop", shopText, 1196, 851, 580, "semibold", 39, "0x8FA3C4FF", "right")
+    else if size = 1
+        goldRect("gBar", 60, 504, 1800, 516, gold)
+        goldAvatar(294, 762, 312, navy, navy3, "", false, initials, photo)
+        goldRect("gChip", 516, 552, 270, 54, navy)
+        goldText("gChipText", "BIG DEAL", 516, 552, 270, 54, "bold", 39, gold, "center", "center")
+        goldTextC("gName", nameU, 516, 667, 560, "bold", 78, navy, "left")
+        goldTextC("gService", detail, 516, 742, 600, "semibold", 48, "0x3A2E0AFF", "left")
+        goldTextC("gAmount", amt, 1010, 741, 790, "bold", goldAmountSize(276, amt), navy, "right")
+    else if size = 2
+        goldRect("gBg", 0, 0, 1920, 1080, navy)
+        n = m.top.findNode("gRays")
+        if n <> invalid
+            n.uri = "pkg:/images/rays_gold.png"        ' set every time: a Monster deal before this one left the stronger rays in place
+            goldPut("gRays", 0, 0, 1920, 1080)
+        end if
+        goldRect("gChip", 690, 54, 540, 96, gold)
+        goldText("gChipText", "HUGE DEAL", 690, 54, 540, 96, "bold", 66, navy, "center", "center")
+        goldAvatar(960, 354, 312, gold, navy3, navy, true, initials, photo)
+        goldTextC("gName", nameU, 0, 585, 1920, "semibold", 72, white, "center")
+        goldTextC("gAmountSh", amt, 0, 788, 1920, "bold", goldAmountSize(300, amt), gold2, "center")
+        goldTextC("gAmount", amt, 0, 776, 1920, "bold", goldAmountSize(300, amt), gold, "center")
+        goldTextC("gService", detail, 0, 1008, 1920, "semibold", 54, silver, "center")
+    else
+        goldRect("gBg", 0, 0, 1920, 1080, navy)
+        n = m.top.findNode("gRays")
+        if n <> invalid
+            n.uri = "pkg:/images/rays_gold_bold.png"
+            goldPut("gRays", 0, 0, 1920, 1080)
+        end if
+        goldPut("gHazTop", 0, 0, 1920, 66)
+        goldPut("gHazBot", 0, 1014, 1920, 66)
+        goldRect("gBand", 0, 108, 1920, 198, gold)
+        goldRect("gBandL1", 0, 108, 1920, 9, white)
+        goldRect("gBandL2", 0, 297, 1920, 9, white)
+        goldText("gChipText", "MONSTER DEAL", 0, 108, 1920, 198, "bold", 150, navy, "center", "center")
+        goldTextC("gAmountSh", amt, 0, 562, 1920, "bold", goldAmountSize(396, amt), gold2, "center")
+        goldTextC("gAmount", amt, 0, 547, 1920, "bold", goldAmountSize(396, amt), white, "center")
+        line = nameU
+        if detail <> "" then line = nameU + "  -  " + detail
+        goldTextC("gName", line, 0, 825, 1920, "semibold", 72, white, "center")
+        if shop <> ""
+            goldRect("gShopO", 640, 888, 640, 84, gold)
+            goldRect("gShopI", 646, 894, 628, 72, navy)
+            goldText("gShop", UCase(shop), 640, 888, 640, 84, "bold", 45, gold, "center", "center")
+        end if
+    end if
+    if m.gold = invalid then return
+    m.bannerTimer.duration = goldSeconds(size)
+    m.gold.opacity = 0                     ' start invisible and fade in, so the celebration never flashes at full strength for one frame
+    m.gold.visible = m.display.banner
+    if m.goldAnim <> invalid
+        m.goldAnim.control = "stop"
+        m.goldAnim.control = "start"
+    end if
+    if size >= 2 then startGoldConfetti() else startConfetti()
+    label = name
+    if c.isTest = true then label = "test"
+    print "TV> celebration size " + size.ToStr() + " " + nameU + " " + amt
+    playSound(c.sound, label)
+    m.bannerTimer.control = "start"
 end sub
 
 ' ---- the "Deal closed" banner, one at a time, with the deal's own sound ----
@@ -544,6 +819,11 @@ sub showNextBanner()
     m.bannerBusy = true
     c = m.queue.Shift()
     more = m.queue.Count()
+    if goldWanted(c)                       ' a deal that comes with a size gets its Gold Rush celebration; anything else gets the original banner below
+        showGold(c, more)
+        return
+    end if
+    m.bannerTimer.duration = m.bannerSecs
     if c.isTest = true
         m.top.findNode("bannerBg").color = "0x2F6FEDFF"
         m.top.findNode("bannerTop").text = "SOUND TEST"
@@ -575,6 +855,7 @@ end sub
 
 sub bannerDone()
     m.banner.visible = false
+    hideGold()
     m.bannerBusy = false
     showNextBanner()
 end sub

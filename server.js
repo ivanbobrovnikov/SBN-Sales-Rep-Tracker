@@ -570,19 +570,58 @@ function tvAuth(req, res, next) {
 
 // Which sound a deal gets on the TV, worked out here so the Roku only has to play it: the rep's own sound if they have one and it is ready for the Roku,
 // otherwise the TV's default. "Random" is picked from the deal itself, so the same deal always gets the same sound. Off means silent for everyone.
-function resolveTvSound(db, repName, closeKey) {
-  const settings = db.tv.settings;
-  if (settings.defaultSound === "off") return null;
-  const readyCustom = db.sounds.filter((s) => s.tvWav).map((s) => s.id);
-  const usable = (c) => typeof c === "string" && (BUILTIN_SOUND_KEYS.includes(c) || (c.indexOf("custom:") === 0 && readyCustom.includes(c.slice(7))));
-  const rep = db.repSounds.find((r) => r.key === repKey(repName));
-  let choice = rep && usable(rep.choice) ? rep.choice : settings.defaultSound;
-  const fallback = BUILTIN_SOUND_KEYS[hashInt("fallback:" + closeKey) % BUILTIN_SOUND_KEYS.length];
+// A sound choice (a built-in key, "custom:<id>", "random" or "custom-random") turned into the sound the Roku plays. A choice that isn't ready for the Roku yet becomes a built-in sound, never silence.
+const tvReadyCustom = (db) => db.sounds.filter((s) => s.tvWav).map((s) => s.id);
+const tvUsable = (db, c) => typeof c === "string" && (BUILTIN_SOUND_KEYS.includes(c) || (c.indexOf("custom:") === 0 && tvReadyCustom(db).includes(c.slice(7))));
+function tvSoundFromChoice(db, choice, closeKey) {
+  const readyCustom = tvReadyCustom(db), fallback = BUILTIN_SOUND_KEYS[hashInt("fallback:" + closeKey) % BUILTIN_SOUND_KEYS.length];
   if (choice === "random") { const pool = BUILTIN_SOUND_KEYS.concat(readyCustom.map((id) => "custom:" + id)); choice = pool[hashInt(closeKey) % pool.length]; }
   else if (choice === "custom-random") choice = readyCustom.length ? "custom:" + readyCustom[hashInt(closeKey) % readyCustom.length] : fallback;
   if (BUILTIN_SOUND_KEYS.includes(choice)) return { kind: "builtin", key: choice };
-  if (usable(choice)) return { kind: "custom", id: choice.slice(7), fallback };
-  return { kind: "builtin", key: fallback };       // the choice isn't ready for the Roku (yet): a built-in sound, never silence
+  if (tvUsable(db, choice)) return { kind: "custom", id: choice.slice(7), fallback };
+  return { kind: "builtin", key: fallback };
+}
+// Which sound a deal gets on the TV, worked out here so the Roku only has to play it. A bigger deal (tier 1 to 3) gets the sound the owner picked for its size, if they picked one; otherwise the rep's own sound if they have one
+// and it is ready for the Roku, otherwise the TV's default. "Random" is picked from the deal itself, so the same deal always gets the same sound. Off means silent for everyone.
+function resolveTvSound(db, repName, closeKey, tier) {
+  const settings = db.tv.settings;
+  if (settings.defaultSound === "off") return null;
+  if (tier > 0) { const pick = tvCelebrateView(settings).sounds[tier]; if (pick === "off") return null; if (pick) return tvSoundFromChoice(db, pick, closeKey); }
+  const rep = db.repSounds.find((r) => r.key === repKey(repName));
+  return tvSoundFromChoice(db, rep && tvUsable(db, rep.choice) ? rep.choice : settings.defaultSound, closeKey);
+}
+// ---- Celebrations by deal size: the bigger the deal, the bigger the banner (and, if you pick one, the sound) ----
+// Tier 0 is every deal under the first amount; tiers 1, 2 and 3 start at the three amounts. The owner sets the amounts, how long each is on screen, and a sound for tiers 1 to 3.
+const TV_CELEBRATE_DEFAULTS = { enabled: false, thresholds: [500, 1000, 2000], seconds: [9, 12, 15, 20], sounds: ["", "", "", ""] };
+const tvCelebrateView = (st) => {
+  const c = (st && st.celebrate) || {}, arr = (v, d, n) => (Array.isArray(v) && v.length === n ? v.slice() : d.slice());
+  return { enabled: c.enabled === true, thresholds: arr(c.thresholds, TV_CELEBRATE_DEFAULTS.thresholds, 3), seconds: arr(c.seconds, TV_CELEBRATE_DEFAULTS.seconds, 4), sounds: arr(c.sounds, TV_CELEBRATE_DEFAULTS.sounds, 4) };
+};
+const tvTierOf = (cel, priceCents) => {
+  if (!cel.enabled || !Number.isFinite(priceCents) || priceCents <= 0) return 0;
+  let t = 0; cel.thresholds.forEach((x, i) => { if (priceCents / 100 >= x) t = i + 1; }); return t;
+};
+function tvCelebrateCheck(db, b) {
+  if (!b || typeof b !== "object") return { error: "Nothing to change." };
+  const out = {}, int = (n) => Number.isInteger(n);
+  if (b.enabled !== undefined) { if (typeof b.enabled !== "boolean") return { error: "Celebrations must be on or off." }; out.enabled = b.enabled; }
+  if (b.thresholds !== undefined) {
+    const t = b.thresholds;
+    if (!Array.isArray(t) || t.length !== 3 || !t.every((x) => int(x) && x >= 1 && x <= 1000000)) return { error: "Give three whole-dollar amounts." };
+    if (!(t[0] < t[1] && t[1] < t[2])) return { error: "Each amount has to be bigger than the one before it." };
+    out.thresholds = t;
+  }
+  if (b.seconds !== undefined) {
+    const t = b.seconds;
+    if (!Array.isArray(t) || t.length !== 4 || !t.every((x) => int(x) && x >= 5 && x <= 30)) return { error: "Each celebration stays on screen between 5 and 30 seconds." };
+    out.seconds = t;
+  }
+  if (b.sounds !== undefined) {
+    const t = b.sounds, ok = (c, i) => c === "" || (i > 0 && (c === "off" || c === "random" || c === "custom-random" || BUILTIN_SOUND_KEYS.includes(c) || (/^custom:[a-f0-9]{16}$/.test(c) && tvReadyCustom(db).includes(c.slice(7)))));
+    if (!Array.isArray(t) || t.length !== 4 || !t.every((c, i) => typeof c === "string" && ok(c, i))) return { error: "One of those sounds isn't available on the Roku yet." };
+    out.sounds = t;
+  }
+  return { clean: out };
 }
 const easternDay = (d) => new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
 
@@ -674,13 +713,15 @@ function assembleTvFeed(db, base, stale) {
   const now = Date.now();
   const photoOf = (name) => { const p = (db.repPhotos || []).find((x) => x.key === repKey(name)); return p ? { id: p.id } : null; };
   const rows = base.rows.map((r) => ({ ...r, photo: photoOf(r.name) }));
-  const closes = base.closes.map((c) => ({ key: c.key, repName: c.repName, priceCents: c.priceCents, service: c.service, location: c.location, ageSec: Number.isFinite(c.closedAtMs) ? Math.round((now - c.closedAtMs) / 1000) : null, sound: resolveTvSound(db, c.repName, c.key) }));
+  const cel = tvCelebrateView(db.tv.settings);
+  const closes = base.closes.map((c) => { const tier = tvTierOf(cel, c.priceCents); return { key: c.key, repName: c.repName, priceCents: c.priceCents, service: c.service, location: c.location, ageSec: Number.isFinite(c.closedAtMs) ? Math.round((now - c.closedAtMs) / 1000) : null, tier, sound: resolveTvSound(db, c.repName, c.key, tier) }; });
   const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hourCycle: "h23", hour: "numeric", minute: "numeric", second: "numeric" }).formatToParts(new Date(now)).filter((p) => p.type !== "literal").map((p) => [p.type, Number(p.value)]));
   const settings = db.tv.settings, ready = db.sounds.filter((s) => s.tvWav).map((s) => s.id), need = new Set();
   if (settings.defaultSound === "random" || settings.defaultSound === "custom-random") ready.forEach((id) => need.add(id));
   else if (typeof settings.defaultSound === "string" && settings.defaultSound.indexOf("custom:") === 0 && ready.includes(settings.defaultSound.slice(7))) need.add(settings.defaultSound.slice(7));
   db.repSounds.forEach((r) => { if (r.choice.indexOf("custom:") === 0 && ready.includes(r.choice.slice(7))) need.add(r.choice.slice(7)); });
-  return { now: new Date(now).toISOString(), clock: { h: parts.hour || 0, m: parts.minute || 0, s: parts.second || 0 }, volume: TV_VOLUMES[settings.volume] || 70, soundMethod: settings.soundMethod || "auto", confetti: settings.confetti !== false, display: tvDisplayView(settings), month: (tvMonthCache.data && String(tvMonthCache.data.day).slice(0, 7) === easternDay(new Date(now)).slice(0, 7)) ? { ...tvMonthCache.data, rows: tvMonthCache.data.rows.map((r) => ({ ...r, photo: photoOf(r.name) })) } : null, totals: base.totals, test: { seq: db.tv.test.seq || 0, sound: db.tv.test.sound }, rows, closes, customSounds: Array.from(need), unreachable: base.unreachable, ...(stale ? { stale: true } : {}) };
+  cel.sounds.forEach((c) => { if (c === "random" || c === "custom-random") ready.forEach((id) => need.add(id)); else if (typeof c === "string" && c.indexOf("custom:") === 0 && ready.includes(c.slice(7))) need.add(c.slice(7)); });
+  return { now: new Date(now).toISOString(), clock: { h: parts.hour || 0, m: parts.minute || 0, s: parts.second || 0 }, volume: TV_VOLUMES[settings.volume] || 70, soundMethod: settings.soundMethod || "auto", confetti: settings.confetti !== false, display: tvDisplayView(settings), month: (tvMonthCache.data && String(tvMonthCache.data.day).slice(0, 7) === easternDay(new Date(now)).slice(0, 7)) ? { ...tvMonthCache.data, rows: tvMonthCache.data.rows.map((r) => ({ ...r, photo: photoOf(r.name) })) } : null, totals: base.totals, test: { seq: db.tv.test.seq || 0, sound: db.tv.test.sound, ...(db.tv.test.tier !== undefined ? { tier: db.tv.test.tier, priceCents: db.tv.test.priceCents, repName: db.tv.test.repName, service: db.tv.test.service, location: db.tv.test.location } : {}) }, celebrate: { enabled: cel.enabled, seconds: cel.seconds }, rows, closes, customSounds: Array.from(need), unreachable: base.unreachable, ...(stale ? { stale: true } : {}) };
 }
 // Asking the shops can be slow (a shop that is waking up, or busy). The TV gives up on a refresh after a while, so:
 //  - only ONE round of questions is ever in progress; a second TV request joins it instead of starting another
@@ -726,13 +767,15 @@ app.get("/api/tv/sound/:id", tvAuth, (req, res) => {
 // ---- the owner's side: status, settings, building the app, turning it off ----
 app.get("/api/tv", requireOwner, (req, res) => {
   const db = loadDB();
-  res.json({ hasKey: !!db.tv.keyHash, createdAt: db.tv.createdAt, settings: db.tv.settings, display: tvDisplayView(db.tv.settings), lastSeenAt: tvLastSeenAt ? new Date(tvLastSeenAt).toISOString() : null, reports: db.tv.reports.slice(-12).reverse(), feed: tvFeedStats });
+  res.json({ hasKey: !!db.tv.keyHash, createdAt: db.tv.createdAt, settings: db.tv.settings, celebrate: tvCelebrateView(db.tv.settings), display: tvDisplayView(db.tv.settings), lastSeenAt: tvLastSeenAt ? new Date(tvLastSeenAt).toISOString() : null, reports: db.tv.reports.slice(-12).reverse(), feed: tvFeedStats });
 });
 app.put("/api/tv/settings", requireOwner, (req, res) => {
   const db = loadDB();
   const { defaultSound, volume, soundMethod, confetti } = req.body || {};
   let displayClean = null;
   if ((req.body || {}).display !== undefined) { const chk = tvDisplayCheck(req.body.display); if (chk.error) return res.status(400).json({ error: chk.error }); displayClean = chk.clean; }
+  let celebrateClean = null;
+  if ((req.body || {}).celebrate !== undefined) { const chk = tvCelebrateCheck(db, req.body.celebrate); if (chk.error) return res.status(400).json({ error: chk.error }); celebrateClean = chk.clean; }
   const ready = db.sounds.filter((s) => s.tvWav).map((s) => s.id);
   const okSound = defaultSound === undefined || defaultSound === "random" || defaultSound === "off" || defaultSound === "custom-random" || BUILTIN_SOUND_KEYS.includes(defaultSound) || (typeof defaultSound === "string" && /^custom:[a-f0-9]{16}$/.test(defaultSound) && ready.includes(defaultSound.slice(7)));
   if (!okSound) return res.status(400).json({ error: "That sound isn't available on the Roku yet." });
@@ -740,6 +783,7 @@ app.put("/api/tv/settings", requireOwner, (req, res) => {
   if (soundMethod !== undefined && !TV_SOUND_METHODS.includes(soundMethod)) return res.status(400).json({ error: "Unknown way of playing sounds." });
   if (confetti !== undefined && typeof confetti !== "boolean") return res.status(400).json({ error: "Confetti must be on or off." });
   if (displayClean) tvDisplayApply(db, displayClean);
+  if (celebrateClean) db.tv.settings.celebrate = Object.assign(tvCelebrateView(db.tv.settings), celebrateClean);
   if (confetti !== undefined) db.tv.settings.confetti = confetti;
   if (soundMethod !== undefined) db.tv.settings.soundMethod = soundMethod;
   if (defaultSound !== undefined) db.tv.settings.defaultSound = defaultSound;
@@ -811,6 +855,15 @@ app.post("/api/tv/test-sound", requireOwner, (req, res) => {
   db.tv.test = { seq: (db.tv.test.seq || 0) + 1, sound: isCustom ? { kind: "custom", id: key.slice(7), fallback: "chaching" } : { kind: "builtin", key } };
   saveDB(db);
   res.json({ ok: true, seq: db.tv.test.seq });
+});
+// Plays one celebration on the TV, so a size can be seen and heard without waiting for a real deal. It uses the amount the size starts at (299 for the standard one) and the sound picked for that size.
+app.post("/api/tv/test-celebration", requireOwner, (req, res) => {
+  const db = loadDB(), tier = (req.body || {}).tier;
+  if (![0, 1, 2, 3].includes(tier)) return res.status(400).json({ error: "Pick one of the four sizes." });
+  const cel = tvCelebrateView(db.tv.settings), dollars = tier === 0 ? 299 : cel.thresholds[tier - 1], seq = (db.tv.test.seq || 0) + 1;
+  db.tv.test = { seq, sound: resolveTvSound(db, "Sample Rep", "test:" + seq, tier), tier, priceCents: dollars * 100, repName: "Sample Rep", service: "Sample deal", location: "Your shop" };
+  saveDB(db);
+  res.json({ ok: true, seq, tier, dollars });
 });
 app.delete("/api/tv/key", requireOwner, (req, res) => {
   const db = loadDB();

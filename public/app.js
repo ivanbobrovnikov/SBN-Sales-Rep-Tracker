@@ -874,6 +874,37 @@ async function renderSettings(content) {
     rokuBox.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: "Confetti falls across the TV with every Deal closed banner. If your TV ever looks choppy while it falls, turn it off." }));
     rokuBox.appendChild(confetti);
 
+    // CELEBRATIONS BY DEAL SIZE: the bigger the deal, the bigger the banner (and a sound of your choice). Each size has where it starts, how long it stays on screen, and a Test button.
+    const cel = tv.celebrate || { enabled: false, thresholds: [500, 1000, 2000], seconds: [9, 12, 15, 20], sounds: ["", "", "", ""] }, TIER_NAMES = ["Standard", "Big deal", "Huge deal", "Monster deal"], dollars = (n) => "$" + Number(n).toLocaleString("en-US");
+    const saveCel = (patch) => saveSetting({ celebrate: patch }), celBox = el("div", { "data-part": "celebrate" });
+    rokuBox.appendChild(el("div", { class: "muted", style: "font-size:11px;letter-spacing:0.04em;margin:14px 0 4px", text: "CELEBRATIONS BY DEAL SIZE" }));
+    rokuBox.appendChild(el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:6px", text: "The bigger the deal, the bigger and bolder the banner on the TV, and you can pick a different sound for each size. Standard is every deal under the first amount. This needs the newest Roku app (version 1.4): download it again below and install it once. Press Test on the TV for each size, and turn this on when you like them. Until then every deal keeps the original green banner." }));
+    const onOff = el("select", { "data-field": "cel-enabled", style: "width:100%;margin-bottom:8px" }, [opt("off", "Celebrations by size: off (every deal keeps the original green banner)"), opt("on", "Celebrations by size: on")]); onOff.value = cel.enabled === true ? "on" : "off"; onOff.addEventListener("change", () => saveCel({ enabled: onOff.value === "on" })); rokuBox.appendChild(onOff);
+    const secOpts = [5, 7, 9, 12, 15, 20, 25, 30], soundSelect = (i) => {
+      const s = el("select", { "data-field": "cel-sound-" + i, style: "width:100%" });
+      s.appendChild(opt("", "Same as others")); s.appendChild(opt("off", "Silent for this size")); s.appendChild(opt("random", "Random (all sounds)"));
+      Object.entries(DEAL_SOUNDS).forEach(([k, d]) => s.appendChild(opt(k, d.name)));
+      if (ready.length) { const g = document.createElement("optgroup"); g.label = "My sounds (ready for the Roku)"; g.appendChild(opt("custom-random", "Random: just my sounds")); ready.forEach((x) => g.appendChild(opt("custom:" + x.id, x.name))); s.appendChild(g); }
+      s.value = cel.sounds[i] || ""; if (s.value !== (cel.sounds[i] || "")) s.value = "";
+      s.addEventListener("change", () => { const list = cel.sounds.slice(); list[i] = s.value; cel.sounds = list; saveCel({ sounds: list }); }); return s;
+    };
+    const amountInputs = [];
+    TIER_NAMES.forEach((nm, i) => {
+      const secs = el("select", { "data-field": "cel-seconds-" + i, style: "width:100%" }); const have = secOpts.includes(cel.seconds[i]) ? secOpts : secOpts.concat([cel.seconds[i]]).sort((x, y) => x - y); have.forEach((n) => secs.appendChild(opt(String(n), n + " seconds"))); secs.value = String(cel.seconds[i]);
+      secs.addEventListener("change", () => { const list = cel.seconds.slice(); list[i] = Number(secs.value); cel.seconds = list; saveCel({ seconds: list }); });
+      const head = el("div", { style: "display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px" });
+      head.appendChild(el("b", { style: "font-size:15px", text: nm }));
+      if (i === 0) head.appendChild(el("span", { class: "muted", "data-part": "cel-range-0", style: "font-size:13px", text: "every deal under " + dollars(cel.thresholds[0]) }));
+      else { const inp = el("input", { type: "text", inputmode: "numeric", "data-field": "cel-threshold-" + i, "aria-label": nm + " starts at", value: String(cel.thresholds[i - 1]), style: "width:110px;font-size:16px" }); amountInputs.push(inp);
+        inp.addEventListener("change", () => { const vals = amountInputs.map((x) => Number(String(x.value).replace(/[^0-9]/g, ""))); if (vals.some((v) => !Number.isInteger(v) || v < 1) || !(vals[0] < vals[1] && vals[1] < vals[2])) { say("Each amount has to be a whole number of dollars, bigger than the one before it.", "var(--red)"); amountInputs.forEach((x, k) => { x.value = String(cel.thresholds[k]); }); return; } cel.thresholds = vals; const r0 = celBox.querySelector('[data-part="cel-range-0"]'); if (r0) r0.textContent = "every deal under " + dollars(vals[0]); saveCel({ thresholds: vals }); });
+        head.appendChild(el("span", { class: "muted", style: "font-size:13px", text: "starts at $" })); head.appendChild(inp); }
+      const test = el("button", { class: "ghost", "data-act": "cel-test-" + i, style: "margin-left:auto", text: "Test on the TV", onclick: async () => { try { const r = await api("/api/tv/test-celebration", { method: "POST", body: JSON.stringify({ tier: i }) }); say("Asked the TV to show a " + nm + " celebration (" + dollars(r.dollars) + "). It picks that up within about 15 seconds.", "var(--green)"); } catch (e) { say(e.message || "Couldn't ask the TV.", "var(--red)"); } } });
+      head.appendChild(test);
+      celBox.appendChild(el("div", { "data-part": "cel-tier", "data-tier": String(i), style: "border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px" }, [head,
+        el("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:8px" }, [el("div", {}, [el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:3px", text: "Stays on screen" }), secs]), el("div", {}, [el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:3px", text: "Sound" }), i === 0 ? el("div", { class: "muted", style: "font-size:13px;padding:8px 0", text: "Normal (the rep's own, or the default)" }) : soundSelect(i)])])]));
+    });
+    rokuBox.appendChild(celBox);
+
     // the owner's own sounds need a Roku copy; this makes it for the ones uploaded before the Roku app existed
     if (sounds.length) {
       const waiting = sounds.filter((s) => !s.tvReady);

@@ -37,12 +37,47 @@
       <Label id="bannerMain" text="" color="0xFFFFFFFF" translation="[0,46]" width="1600" height="90" horizAlign="center" />
       <Label id="bannerSub" text="" color="0xE3FFEEFF" translation="[0,132]" width="1600" height="50" horizAlign="center" />
     </Group>
+    <Group id="gold" translation="[0,0]" visible="false" scaleRotateCenter="[960,540]">
+      <Rectangle id="gBg" color="0x0B1D3AFF" translation="[0,0]" width="1920" height="1080" visible="false" />
+      <Poster id="gRays" uri="pkg:/images/rays_gold.png" translation="[0,0]" width="1920" height="1080" loadDisplayMode="scaleToFit" visible="false" />
+      <Poster id="gConfetti" uri="pkg:/images/confetti.png" translation="[0,-1080]" width="1920" height="2160" loadDisplayMode="scaleToFit" visible="false" />
+      <Poster id="gHazTop" uri="pkg:/images/hazard.png" translation="[0,0]" width="1920" height="66" loadDisplayMode="scaleToFit" visible="false" />
+      <Poster id="gHazBot" uri="pkg:/images/hazard.png" translation="[0,1014]" width="1920" height="66" loadDisplayMode="scaleToFit" visible="false" />
+      <Rectangle id="gBar" color="0x12294DFF" translation="[0,0]" width="10" height="10" visible="false" />
+      <Rectangle id="gBarLine" color="0xE8B93BFF" translation="[0,0]" width="10" height="10" visible="false" />
+      <Rectangle id="gBand" color="0xE8B93BFF" translation="[0,0]" width="10" height="10" visible="false" />
+      <Rectangle id="gBandL1" color="0xFFFFFFFF" translation="[0,0]" width="10" height="10" visible="false" />
+      <Rectangle id="gBandL2" color="0xFFFFFFFF" translation="[0,0]" width="10" height="10" visible="false" />
+      <Poster id="gAvR1" uri="pkg:/images/circle.png" translation="[0,0]" width="10" height="10" loadDisplayMode="scaleToFit" visible="false" />
+      <Poster id="gAvR2" uri="pkg:/images/circle.png" translation="[0,0]" width="10" height="10" loadDisplayMode="scaleToFit" visible="false" />
+      <Poster id="gAvR3" uri="pkg:/images/circle.png" translation="[0,0]" width="10" height="10" loadDisplayMode="scaleToFit" visible="false" />
+      <Poster id="gAvIn" uri="pkg:/images/circle.png" translation="[0,0]" width="10" height="10" loadDisplayMode="scaleToFit" visible="false" />
+      <Poster id="gAvPhoto" uri="" translation="[0,0]" width="10" height="10" loadDisplayMode="scaleToFit" visible="false" />
+      <Label id="gAvInit" text="" color="0xFFFFFFFF" translation="[0,0]" width="10" height="10" horizAlign="center" vertAlign="center" visible="false" />
+      <Rectangle id="gChip" color="0x0B1D3AFF" translation="[0,0]" width="10" height="10" visible="false" />
+      <Label id="gChipText" text="" color="0xE8B93BFF" translation="[0,0]" width="10" height="10" horizAlign="center" vertAlign="center" visible="false" />
+      <Label id="gTop" text="" color="0xE8B93BFF" translation="[0,0]" width="10" height="10" visible="false" />
+      <Label id="gName" text="" color="0xFFFFFFFF" translation="[0,0]" width="10" height="10" visible="false" />
+      <Label id="gAmountSh" text="" color="0xB8891AFF" translation="[0,0]" width="10" height="10" visible="false" />
+      <Label id="gAmount" text="" color="0xFFFFFFFF" translation="[0,0]" width="10" height="10" visible="false" />
+      <Label id="gService" text="" color="0xC9D3E3FF" translation="[0,0]" width="10" height="10" visible="false" />
+      <Rectangle id="gShopO" color="0xE8B93BFF" translation="[0,0]" width="10" height="10" visible="false" />
+      <Rectangle id="gShopI" color="0x0B1D3AFF" translation="[0,0]" width="10" height="10" visible="false" />
+      <Label id="gShop" text="" color="0xE8B93BFF" translation="[0,0]" width="10" height="10" visible="false" />
+    </Group>
     <Label id="status" text="" font="font:SmallSystemFont" color="0xFFB454FF" translation="[100,1036]" width="900" height="36" />
-    <Label id="version" text="v1.3" font="font:SmallestSystemFont" color="0x3F4D69FF" translation="[1760,1052]" width="60" height="26" horizAlign="right" />
+    <Label id="version" text="v1.4" font="font:SmallestSystemFont" color="0x3F4D69FF" translation="[1760,1052]" width="60" height="26" horizAlign="right" />
     <Label id="diag" text="" font="font:SmallestSystemFont" color="0x6F7C96FF" translation="[1000,1042]" width="820" height="30" horizAlign="right" />
     <Group id="menuGroup" translation="[0,0]" visible="false" />
     <Animation id="confettiAnim" duration="3.4" repeat="false" easeFunction="linear">
       <Vector2DFieldInterpolator id="confettiInterp" fieldToInterp="confetti.translation" key="[0.0, 1.0]" keyValue="[[0.0, -1080.0], [0.0, 0.0]]" />
+    </Animation>
+    <Animation id="goldAnim" duration="0.35" repeat="false" easeFunction="outQuad">
+      <FloatFieldInterpolator id="goldFadeI" fieldToInterp="gold.opacity" key="[0.0, 1.0]" keyValue="[0.0, 1.0]" />
+      <Vector2DFieldInterpolator id="goldScaleI" fieldToInterp="gold.scale" key="[0.0, 1.0]" keyValue="[[0.94, 0.94], [1.0, 1.0]]" />
+    </Animation>
+    <Animation id="gConfettiAnim" duration="3.4" repeat="false" easeFunction="linear">
+      <Vector2DFieldInterpolator id="gConfettiI" fieldToInterp="gConfetti.translation" key="[0.0, 1.0]" keyValue="[[0.0, -1080.0], [0.0, 0.0]]" />
     </Animation>
     <Timer id="pollTimer" repeat="true" duration="15" />
     <Timer id="clockTimer" repeat="true" duration="1" />
