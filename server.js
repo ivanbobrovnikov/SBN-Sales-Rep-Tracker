@@ -1258,11 +1258,14 @@ app.get("/api/revenue/report", requireOwner, async (req, res) => {
   const out = await Promise.all(db.locations.map(async (loc) => {
     const r = await askShop(loc, "/api/cross-location/revenue?" + q.toString());
     if (r.needsUpdate || r.error || !r.ok || !r.data) return { name: loc.name, ok: false, error: shopProblem(loc, r) };
-    const d = r.data; return { name: loc.name, ok: true, revenue: Number(d.revenue) || 0, upsellRevenue: Number(d.upsellRevenue) || 0, walkInRevenue: Number(d.walkInRevenue) || 0, paidJobs: d.paidJobs || 0, carsServiced: d.carsServiced || 0, range: d.range };
+    const d = r.data; return { name: loc.name, ok: true, revenue: Number(d.revenue) || 0, upsellRevenue: Number(d.upsellRevenue) || 0, walkInRevenue: Number(d.walkInRevenue) || 0, paidJobs: d.paidJobs || 0, carsServiced: d.carsServiced || 0, range: d.range, booked: d.booked && Number.isFinite(Number(d.booked.projected)) ? d.booked : null };
   }));
   const ok = out.filter((x) => x.ok), r2 = (n) => Math.round(n * 100) / 100, sum = (k) => r2(ok.reduce((a, x) => a + x[k], 0));
   revGive(req, res, un.iat);        // using the screen keeps it unlocked (up to 2 hours in all)
-  res.json({ period, range: (ok.find((x) => x.range) || {}).range || null, total: { revenue: sum("revenue"), upsellRevenue: sum("upsellRevenue"), walkInRevenue: sum("walkInRevenue"), paidJobs: ok.reduce((a, x) => a + x.paidJobs, 0), carsServiced: ok.reduce((a, x) => a + x.carsServiced, 0) }, locations: out.map(({ range, ...x }) => x), partial: ok.length < out.length });
+  // The projection across locations: each location's collected money plus what it has booked on top (arrived but unpaid, and jobs still to come). A location still on an older release can't say, so it is left out and the screen says so.
+  const withB = ok.filter((x) => x.booked), pj = (k) => r2(withB.reduce((a, x) => a + (Number(x.booked[k]) || 0), 0)), pjn = (k) => withB.reduce((a, x) => a + (Number(x.booked[k]) || 0), 0);
+  const projection = { collected: r2(withB.reduce((a, x) => a + x.revenue, 0)), arrivedUnpaid: pj("arrivedUnpaid"), arrivedUnpaidCount: pjn("arrivedUnpaidCount"), pending: pj("pending"), pendingCount: pjn("pendingCount"), projected: pj("projected"), locations: withB.length, notUpdated: ok.length - withB.length };
+  res.json({ projection, period, range: (ok.find((x) => x.range) || {}).range || null, total: { revenue: sum("revenue"), upsellRevenue: sum("upsellRevenue"), walkInRevenue: sum("walkInRevenue"), paidJobs: ok.reduce((a, x) => a + x.paidJobs, 0), carsServiced: ok.reduce((a, x) => a + x.carsServiced, 0) }, locations: out.map(({ range, ...x }) => x), partial: ok.length < out.length });
 });
 
 // ---------- Add a sales rep ONCE, to every shop ----------
