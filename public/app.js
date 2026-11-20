@@ -1084,7 +1084,7 @@ async function renderCleanup(content) {
       const list = el("div", { style: "display:none;margin-top:6px" }, left.map((c) => el("div", { class: "row", style: "padding:6px 0;border-top:0.5px solid var(--border);align-items:flex-start" }, [
         el("div", {}, [
           el("div", { text: c.car }),
-          el("div", { class: "muted", style: "font-size:11px", text: `${c.repName}${c.customerName ? " · " + c.customerName : ""} · ${c.locationName} · closed ${formatDateTime(c.closedAt)}${c.auto ? " · flagged automatically (the title says rescheduled)" : ""}` }),
+          el("div", { class: "muted", style: "font-size:11px", text: `${c.repName}${c.customerName ? " · " + c.customerName : ""} · ${c.locationName} · closed ${formatDateTime(c.closedAt)}${c.auto ? " · flagged automatically (" + autoWhy(c) + ")" : ""}` }),
         ]),
         el("div", { style: "text-align:right" }, [
           el("div", { class: "mono", style: "color:var(--amber)", text: money(c.basePrice) }),
@@ -1185,6 +1185,13 @@ async function renderCleanup(content) {
 // Today's calendar date in Eastern time. The shops run on Eastern, but toISOString() is UTC,
 // which rolls over to "tomorrow" around 8pm Eastern - so a picker built on it opened the Day
 // view on an empty future date every evening.
+// Why a booking was flagged as a reschedule automatically (the shop says which rule did it).
+function autoWhy(c) {
+  if (c.autoReason === "rebooked-right-after") return "re-booked right after the earlier booking ended. It keeps its original close time";
+  if (c.autoReason === "rebooked-after-miss") return "re-booked after a missed appointment. It keeps its original close time";
+  if (c.autoReason === "same-day-rebook") return "a same-day re-booking of a no-show";
+  return "the title says rescheduled";
+}
 function easternToday() {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 }
@@ -1691,7 +1698,7 @@ async function renderAudit(content) {
           el("div", { style: "font-size:13px;font-weight:500", text: c.car }),
           el("div", { class: "muted", style: "font-size:11px", text: [c.repName, c.customerName, c.locationName].filter(Boolean).join(" · ") }),
           el("div", { class: "muted", style: "font-size:10.5px", text: `Closed ${formatDateTime(c.closedAt)} · car scheduled ${formatDateTime(c.date)}` }),
-          c.kind === "same-day" ? el("div", { style: "font-size:10.5px;color:var(--amber)", text: "Same-day booking that didn't show. Still a no-show for the VA to call, and still paid if they show. It counts again when the customer shows." }) : c.auto ? el("div", { style: "font-size:10.5px;color:var(--amber)", text: c.autoReason === "same-day-rebook" ? "Flagged automatically: a same-day re-booking of a no-show" : "Flagged automatically: the title says rescheduled" }) : null,
+          c.kind === "same-day" ? el("div", { style: "font-size:10.5px;color:var(--amber)", text: "Same-day booking that didn't show. Still a no-show for the VA to call, and still paid if they show. It counts again when the customer shows." }) : c.auto ? el("div", { style: "font-size:10.5px;color:var(--amber)", text: "Flagged automatically: " + autoWhy(c) }) : null,
         ]),
         el("div", { class: "mono", style: "font-size:13px", text: money(c.basePrice) }),
       ]),
