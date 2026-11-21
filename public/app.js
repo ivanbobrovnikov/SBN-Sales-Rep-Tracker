@@ -1714,14 +1714,14 @@ async function renderAudit(content) {
     if (left.length === 0) return null;
     const n = left.length;
     const nSD = left.filter((c) => c.kind === "same-day").length, nRe = n - nSD;
-    const label = (open) => `${open ? "▾" : "▸"} ↻ ${n} booking${n !== 1 ? "s" : ""} left out of closing activity: ${[nRe ? `${nRe} rescheduled (still paid when the client shows)` : "", nSD ? `${nSD} same-day that didn't show (counts again if the customer does)` : ""].filter(Boolean).join(", ")}`;
+    const label = (open) => `${open ? "▾" : "▸"} ↻ ${n} booking${n !== 1 ? "s" : ""} left out of closing activity: ${[nRe ? `${nRe} rescheduled (still paid when the client shows)` : "", nSD ? `${nSD} same-day with no deposit that didn't show (counts again if the customer does)` : ""].filter(Boolean).join(", ")}`;
     const list = el("div", { "data-part": "left-out-list", style: "display:none;margin-top:8px" }, left.map((c) => el("div", { "data-kind": c.kind || "reschedule", style: "padding:8px 0;border-top:0.5px solid var(--border)" }, [
       el("div", { class: "row", style: "align-items:flex-start" }, [
         el("div", {}, [
           el("div", { style: "font-size:13px;font-weight:500", text: c.car }),
           el("div", { class: "muted", style: "font-size:11px", text: [c.repName, c.customerName, c.locationName].filter(Boolean).join(" · ") }),
           el("div", { class: "muted", style: "font-size:10.5px", text: `Closed ${formatDateTime(c.closedAt)} · car scheduled ${formatDateTime(c.date)}` }),
-          c.kind === "same-day" ? el("div", { style: "font-size:10.5px;color:var(--amber)", text: "Same-day booking that didn't show. Still a no-show for the VA to call, and still paid if they show. It counts again when the customer shows." }) : c.auto ? el("div", { style: "font-size:10.5px;color:var(--amber)", text: "Flagged automatically: " + autoWhy(c) }) : null,
+          c.kind === "same-day" ? el("div", { style: "font-size:10.5px;color:var(--amber)", text: "Same-day booking with no deposit that didn't show, so it isn't counted as a close (with a deposit taken it would be). Still a no-show for the VA to call, and still paid if they show. It counts again when the customer shows." }) : c.auto ? el("div", { style: "font-size:10.5px;color:var(--amber)", text: "Flagged automatically: " + autoWhy(c) }) : null,
         ]),
         el("div", { class: "mono", style: "font-size:13px", text: money(c.basePrice) }),
       ]),
