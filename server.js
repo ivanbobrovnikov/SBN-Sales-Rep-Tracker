@@ -341,6 +341,20 @@ app.get("/api/combined/cleanup-list", requireOwner, async (req, res) => {
   res.json({ jobs: all.sort((a, b) => (a.date < b.date ? 1 : -1)), errors, possibleReschedules: possibleReschedules.sort((a, b) => (a.closedAt < b.closedAt ? 1 : -1)), leftOut: leftOut.sort((a, b) => (a.closedAt < b.closedAt ? 1 : -1)), recentMerges: recentMerges.sort((a, b) => (a.mergedAt < b.mergedAt ? 1 : -1)) });
 });
 
+// Why prices are missing, per location: how many jobs with a rep have no price, whether a price was ever written, and whether that shop's live link to GHL is connected (without it a price typed into the title in GHL after the booking can never arrive).
+app.get("/api/combined/price-health", requireOwner, async (req, res) => {
+  const db = loadDB(), out = [];
+  await Promise.all(db.locations.map(async (loc) => {
+    try {
+      const r = await fetch(`${loc.url}/api/cross-location/price-health?secret=${encodeURIComponent(loc.secret)}`, { signal: AbortSignal.timeout(10000) });
+      if (r.status === 404) { out.push({ locationId: loc.id, name: loc.name, ok: false, old: true }); return; }          // that shop has not been updated yet
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      out.push({ locationId: loc.id, name: loc.name, ok: true, ...(await r.json()) });
+    } catch (e) { out.push({ locationId: loc.id, name: loc.name, ok: false, error: e.message || "Unreachable" }); }
+  }));
+  res.json({ locations: db.locations.map((l) => out.find((o) => o.locationId === l.id)).filter(Boolean) });
+});
+
 app.post("/api/combined/cleanup-fix", requireOwner, async (req, res) => {
   const db = loadDB();
   const { locationId, saleId, ...fix } = req.body;

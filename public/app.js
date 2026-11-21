@@ -1023,8 +1023,31 @@ function renderGhlAlignment(content) {
   }
 }
 
+// The "why are prices missing" card at the top of Cleanup: per location, how many jobs with a rep have no price and why, and whether that shop's live link to GHL is connected.
+async function renderPriceHealth(content) {
+  const card = el("div", { class: "card", "data-part": "price-health" });
+  content.appendChild(card);
+  let r; try { r = await api("/api/combined/price-health"); } catch (e) { return; }
+  const total = r.locations.reduce((t, l) => t + (l.ok ? l.total : 0), 0), unlinked = r.locations.filter((l) => l.ok && !l.configured);
+  card.appendChild(el("div", { style: "font-weight:700;margin-bottom:4px;" + (total || unlinked.length ? "color:var(--warn)" : "color:var(--green)"), "data-part": "price-headline", text: total ? `${total} job${total === 1 ? "" : "s"} with a rep and no price across your locations` : "\u2713 Every job with a rep has a price" }));
+  r.locations.forEach((l) => {
+    const row = el("div", { "data-part": "price-location", style: "border-top:1px solid var(--border);padding:8px 0" });
+    if (!l.ok) { row.appendChild(el("div", { style: "font-weight:600", text: l.name })); row.appendChild(el("div", { class: "muted", style: "font-size:12px", text: l.old ? "Needs the latest tracker update before it can report this." : (l.error || "Couldn't be reached") })); card.appendChild(row); return; }
+    row.appendChild(el("div", { class: "row", style: "align-items:baseline;gap:8px" }, [el("div", { style: "font-weight:600;flex:1", text: l.name }), el("div", { style: "font-size:13px", text: l.total ? `${l.total} without a price (${l.upcoming} upcoming)` : "all priced" })]));
+    if (l.none) row.appendChild(el("div", { class: "muted", style: "font-size:12px", text: `${l.none}: no price is written in any title it has received` }));
+    if (l.unsure) row.appendChild(el("div", { class: "muted", style: "font-size:12px", text: `${l.unsure}: a number is written but it can't be told to be the price` }));
+    row.appendChild(el("div", { "data-part": l.configured ? "ghl-linked" : "ghl-unlinked", style: "font-size:12px;" + (l.configured ? "color:var(--green)" : "color:var(--warn);font-weight:600"), text: l.configured ? `Live link to GHL: connected${l.lastRunAt ? ", last check " + formatDateTime(l.lastRunAt) : ""}` : "Live link to GHL: NOT SET UP. A price typed into the title in GHL after the booking can never reach this shop. Add GHL_API_TOKEN and GHL_LOCATION_ID in that shop's Railway Variables." }));
+    if (l.examples && l.examples.length) {
+      const list = el("div", { style: "display:none;margin-top:4px" }), toggle = el("button", { class: "ghost", "data-act": "price-toggle", style: "font-size:11.5px;padding:3px 9px;margin-top:6px", text: "Show these jobs", onclick: () => { const open = list.style.display !== "none"; list.style.display = open ? "none" : ""; toggle.textContent = open ? "Show these jobs" : "Hide these jobs"; } });
+      l.examples.forEach((x) => list.appendChild(el("div", { "data-part": "price-row", style: "padding:6px 0;border-top:0.5px solid var(--border)" }, [el("div", { style: "font-size:12.5px;word-break:break-word", text: x.car || "(no title)" }), el("div", { class: "muted", style: "font-size:11px", text: `${formatDateTime(x.date)} \u00B7 ${x.repName || "no rep"} \u00B7 ${x.kind === "unsure" ? "a number is written, can't tell if it's the price" : "no price written"}` })])));
+      row.appendChild(toggle); row.appendChild(list);
+    }
+    card.appendChild(row);
+  });
+}
 async function renderCleanup(content) {
   renderGhlAlignment(content);
+  renderPriceHealth(content);
   const body = el("div");
   // Suspected reschedules (a booking whose customer already has an earlier unfinished one for the same car) and the
   // ones already left out. The button works at that booking's own location.
