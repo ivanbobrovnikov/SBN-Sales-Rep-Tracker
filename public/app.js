@@ -1212,6 +1212,7 @@ async function renderCleanup(content) {
 function autoWhy(c) {
   if (c.autoReason === "rebooked-right-after") return "re-booked right after the earlier booking ended. It keeps its original close time";
   if (c.autoReason === "rebooked-after-miss") return "re-booked after a missed appointment. It keeps its original close time";
+  if (c.autoReason === "second-appointment") return "a second appointment for the same car while the first is still booked. The first one carries the close";
   if (c.autoReason === "same-day-rebook") return "a same-day re-booking of a no-show";
   return "the title says rescheduled";
 }
